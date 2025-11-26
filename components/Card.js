@@ -24,8 +24,9 @@ export default function Card({ card }) {
   // choose readable text color depending on background
   const textColor = (card && card.color === 'yellow') ? '#222' : '#fff';
 
+  const label = card ? (card.type === 'number' ? `${card.value} ${card.color || ''}` : `${card.type} ${card.color || ''}`) : '';
   return (
-    <CardBox style={{ background: bg, color: textColor }}>
+    <CardBox title={label} style={{ background: bg, color: textColor }}>
       {card && card.type === 'number' ? card.value : card && card.type ? card.type.toUpperCase() : ''}
     </CardBox>
   );

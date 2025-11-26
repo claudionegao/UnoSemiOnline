@@ -35,8 +35,9 @@ export default function handler(req, res) {
       socket.on('start_game', ({ code, playerIds }, cb) => {
         const room = games.get(code);
         if (!room) return cb && cb({ error: 'room not found' });
-        // only the room owner (main/table) can start a game
-        if (room.owner && socket.id !== room.owner) return cb && cb({ error: 'only room owner can start the game' });
+        // only the room owner (main/table) or the first connected player can start a game
+        const firstSocketId = room.players && room.players.size ? Array.from(room.players.keys())[0] : null;
+        if (room.owner && socket.id !== room.owner && socket.id !== firstSocketId) return cb && cb({ error: 'only room owner or first player can start the game' });
         // don't start if a game is already active
         if (room.state) return cb && cb({ error: 'game already in progress' });
         // initialize game state (derive players from room.players by default)

@@ -67,10 +67,22 @@ export default function TableView() {
         <button onClick={startGame}>Iniciar jogo</button>
       </div>
 
+      {/* QR shortcut to player page (Google Charts) */}
+      {room && typeof window !== 'undefined' && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ marginBottom: 6 }}>Atalho QR para jogadores:</div>
+          <img
+            alt={`QR /player/${room}`}
+            src={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(window.location.origin + '/player/' + room)}`}
+            style={{ width: 150, height: 150, border: '1px solid #ccc' }}
+          />
+        </div>
+      )}
+
       <h3>Jogadores</h3>
       <ul>
         {players.map((p, i) => (
-          <li key={i}>{p}</li>
+          <li key={i}>{i + 1}. {p}</li>
         ))}
       </ul>
 

@@ -6,6 +6,7 @@ export default function PlayerView() {
   const { code } = router.query;
   const [socket, setSocket] = useState(null);
   const [state, setState] = useState(null);
+  const [playersList, setPlayersList] = useState([]);
   const [playerId, setPlayerId] = useState(null);
   const [name, setName] = useState('');
   const [unoAlert, setUnoAlert] = useState(null);
@@ -15,6 +16,8 @@ export default function PlayerView() {
   const [winnerId, setWinnerId] = useState(null);
   const audioRef = useRef(null);
   const audioCtxRef = useRef(null);
+  const lastAutoActionRef = useRef(null);
+  const lastSeenCurrentRef = useRef(null);
 
   useEffect(() => {
     if (!code) return;
@@ -22,7 +25,61 @@ export default function PlayerView() {
     import('socket.io-client').then(({ io }) => {
       s = io(undefined, { path: '/api/socket' });
       setSocket(s);
-      s.on('state_update', st => setState(st));
+
+      // helper to decide if a card is playable given a specific state object
+      const isCardPlayableForState = (card, st) => {
+        if (!st) return false;
+        const top = st.discard && st.discard[st.discard.length - 1];
+        const pending = st.pendingDraw || { type: null, amount: 0 };
+        if (pending.amount > 0) return card.type === pending.type;
+        if (card.type === 'wild' || card.type === 'wild_draw4') return true;
+        if (!top) return true;
+        if (card.color && top.color && card.color === top.color) return true;
+        if (card.type === 'number' && top.type === 'number' && card.value === top.value) return true;
+        if (card.type === top.type && card.type !== 'number') return true;
+        return false;
+      };
+
+      const tryAutoAction = (st) => {
+        try {
+          if (!st || !playerId) return;
+          const myIdx = st.players.findIndex(p => p.id === playerId);
+          if (myIdx === -1) return;
+          if (myIdx !== st.current) return; // not your turn
+
+          const pending = st.pendingDraw || { type: null, amount: 0 };
+          const myHand = st.players[myIdx].hand || [];
+          const hasPlayable = myHand.some(c => isCardPlayableForState(c, st));
+
+          // reset auto-action marker when turn index changes
+          if (lastSeenCurrentRef.current !== st.current) {
+            lastAutoActionRef.current = null;
+            lastSeenCurrentRef.current = st.current;
+          }
+
+          if (lastAutoActionRef.current === st.current) return;
+
+          if (!hasPlayable) {
+            lastAutoActionRef.current = st.current;
+            console.log('[auto-action] player', playerId, 'turn', st.current, pending.amount > 0 ? `accept ${pending.amount}` : 'draw 1');
+            if (pending.amount > 0) {
+              // accept penalty via socket
+              s.emit('draw_card', { code, playerId, count: 0 }, (res) => {});
+            } else {
+              s.emit('draw_card', { code, playerId, count: 1 }, (res) => {});
+            }
+          }
+        } catch (e) {
+          console.log('[auto-action] error', e && e.message);
+        }
+      };
+
+      s.on('state_update', st => {
+        setState(st);
+        tryAutoAction(st);
+      });
+
+      s.on('player_joined', ({ players }) => setPlayersList(players || []));
       s.on('uno_alert', ({ ownerId }) => setUnoAlert({ ownerId }));
       s.on('uno_resolved', (info) => { setUnoAlert(null); /* removed alert box for UNO */ });
       s.on('game_over', ({ winnerId }) => {
@@ -62,12 +119,61 @@ export default function PlayerView() {
     }
   }, [state, playerId]);
 
+  // Auto-action: if it's your turn and the only options are to draw or accept penalty, do it once
+  useEffect(() => {
+    if (!state || !playerId || !socket) return;
+    const myIdx = state.players.findIndex(p => p.id === playerId);
+    if (myIdx !== state.current) return; // not your turn
+
+    const pending = state.pendingDraw || { type: null, amount: 0 };
+    const myHand = state.players[myIdx].hand || [];
+    const hasPlayable = myHand.some(isCardPlayable);
+
+    // reset auto-action marker when turn index changes
+    if (lastSeenCurrentRef.current !== state.current) {
+      lastAutoActionRef.current = null;
+      lastSeenCurrentRef.current = state.current;
+    }
+
+    // If we've already auto-acted for this current turn, skip
+    if (lastAutoActionRef.current === state.current) return;
+
+    // If no playable cards, automatically draw or accept penalty
+    if (!hasPlayable) {
+      lastAutoActionRef.current = state.current;
+      console.log('[auto-action] player', playerId, 'turn', state.current, pending.amount > 0 ? `accept ${pending.amount}` : 'draw 1');
+      if (pending.amount > 0) {
+        // accept penalty
+        resolvePendingDraw();
+      } else {
+        // draw one card
+        draw();
+      }
+    }
+  }, [state, playerId, socket]);
+
+  // Reset auto-action markers when game ends or is not present, so automation can run for new games
+  useEffect(() => {
+    if (!state) {
+      lastAutoActionRef.current = null;
+      lastSeenCurrentRef.current = null;
+      console.log('[auto-action] reset markers because state is null');
+    }
+  }, [state]);
+
   function join() {
     const id = name || `P-${Math.floor(Math.random()*1000)}`;
     setPlayerId(id);
     socket.emit('join_room', { code, playerId: id, name: id }, (res) => {
       // after join ask for state
       socket.emit('get_state', { code }, (r) => { if (r.state) setState(r.state); });
+    });
+  }
+
+  function startGame() {
+    if (!socket) return;
+    socket.emit('start_game', { code }, (res) => {
+      if (res && res.error) alert(res.error);
     });
   }
 
@@ -162,6 +268,24 @@ export default function PlayerView() {
         <div style={{ marginTop: 12, padding: 12, background: '#eef', borderRadius: 6 }}><strong>Aguarde o início do jogo...</strong></div>
       )}
 
+      {/* enumerated players + start button for first player */}
+      {playerId && (
+        <div style={{ marginTop: 12 }}>
+          <h4>Jogadores conectados</h4>
+          <ul>
+            {playersList.map((p, i) => (
+              <li key={i}>{i + 1}. {p}</li>
+            ))}
+          </ul>
+          {/* show Start button when this player is the first in the list (menor número) and no game active */}
+          {playersList.length > 0 && playersList[0] === playerId && !state && (
+            <div style={{ marginTop: 8 }}>
+              <button onClick={startGame}>Iniciar jogo (você é #1)</button>
+            </div>
+          )}
+        </div>
+      )}
+
       {unoAlert && (
         <div style={{ marginTop: 8 }}>
           {unoAlert.ownerId === playerId ? (
@@ -183,7 +307,8 @@ export default function PlayerView() {
                         const myIdx = state.players.findIndex(p => p.id === playerId);
                         const isMyTurn = myIdx === state.current;
                         const highlight = isMyTurn && playable;
-                        const dim = !playable;
+                        // only dim (apagar) cards when it IS your turn; when not your turn, keep full opacity
+                        const dim = isMyTurn ? !playable : false;
 
                         // map color names to nicer backgrounds and pick readable text color
                         let bg = '#333';
@@ -194,9 +319,10 @@ export default function PlayerView() {
 
                         const textColor = c.color === 'yellow' ? '#222' : '#fff';
 
+                        const label = c.type === 'number' ? `${c.value} ${c.color || ''}` : `${c.type} ${c.color || ''}`;
                         return (
                           <div key={i} style={{ cursor: playable && isMyTurn ? 'pointer' : 'default' }} onClick={() => handleCardClick(c)}>
-                            <div style={{ width:72, height:100, borderRadius:8, background: bg, color: textColor, display:'flex',alignItems:'center',justifyContent:'center', boxShadow: highlight ? '0 0 12px rgba(255,255,0,0.9)' : '0 2px 6px rgba(0,0,0,0.2)', transform: highlight ? 'translateY(-4px)' : 'none', transition: 'all 120ms ease', opacity: dim ? 0.35 : 1, filter: dim ? 'brightness(0.5) contrast(0.9)' : 'none' }}>{c.type==='number'?c.value:c.type}</div>
+                            <div title={label} style={{ width:72, height:100, borderRadius:8, background: bg, color: textColor, display:'flex',alignItems:'center',justifyContent:'center', boxShadow: highlight ? '0 0 12px rgba(255,255,0,0.9)' : '0 2px 6px rgba(0,0,0,0.2)', transform: highlight ? 'translateY(-4px)' : 'none', transition: 'all 120ms ease', opacity: dim ? 0.35 : 1, filter: dim ? 'brightness(0.5) contrast(0.9)' : 'none' }}>{c.type==='number'?c.value:c.type}</div>
                           </div>
                         );
                       })}

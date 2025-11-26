@@ -1,7 +1,9 @@
 import { Server } from 'socket.io';
 const { initGame, drawCards, playCard } = require('../../lib/game');
 
-const games = new Map(); // roomCode -> { state, players: Map<socketId, playerId> }
+const games = new Map(); // roomCode -> { state, players: Map<socketId, playerId>, owner, unoAlert, unoTimer, winner }
+
+const UNO_TIMEOUT = 7000; // ms before UNO alert expires without penalty
 
 function makeCode() {
   return Math.random().toString(36).slice(2, 7).toUpperCase();
@@ -15,7 +17,7 @@ export default function handler(req, res) {
     io.on('connection', socket => {
       socket.on('create_room', (cb) => {
         const code = makeCode();
-        games.set(code, { players: new Map(), state: null });
+        games.set(code, { players: new Map(), state: null, owner: socket.id, unoAlert: null, unoTimer: null, winner: null });
         socket.join(code);
         socket.emit('created', { code });
         if (cb) cb({ code });
@@ -33,8 +35,25 @@ export default function handler(req, res) {
       socket.on('start_game', ({ code, playerIds }, cb) => {
         const room = games.get(code);
         if (!room) return cb && cb({ error: 'room not found' });
-        // initialize game state
-        room.state = initGame(playerIds || Array.from(room.players.values()));
+        // only the room owner (main/table) can start a game
+        if (room.owner && socket.id !== room.owner) return cb && cb({ error: 'only room owner can start the game' });
+        // don't start if a game is already active
+        if (room.state) return cb && cb({ error: 'game already in progress' });
+        // initialize game state (derive players from room.players by default)
+        const ids = playerIds && playerIds.length ? playerIds : Array.from(room.players.values());
+        room.state = initGame(ids);
+        // log initial top card for debugging / verification
+        try {
+          const top = room.state && room.state.discard && room.state.discard[room.state.discard.length - 1];
+          console.log(`[start_game] room=${code} initial_top=`, top);
+          // emit initial top card so test clients can observe it
+          io.to(code).emit('initial_top', top);
+        } catch (e) {
+          console.log('[start_game] failed to log initial top', e && e.message);
+        }
+        room.winner = null;
+        room.unoAlert = null;
+        if (room.unoTimer) { clearTimeout(room.unoTimer); room.unoTimer = null; }
         io.to(code).emit('state_update', room.state);
         if (cb) cb({ ok: true });
       });
@@ -44,15 +63,37 @@ export default function handler(req, res) {
         if (!room || !room.state) return cb && cb({ error: 'no game' });
         try {
           const result = playCard(room.state, playerId, card, chosenColor);
-          // quando jogo uma carta que não é de compra, e havia pendingDraw, isso é proibido no playCard (lança)
           io.to(code).emit('state_update', room.state);
+
           // verificar UNO: jogador com 1 carta
           const owner = room.state.players.find(p => p.id === playerId && p.hand.length === 1);
           if (owner) {
             // avisar a sala que este jogador está em UNO
             io.to(code).emit('uno_alert', { ownerId: owner.id });
+            // setup server-side uno alert with timeout
             room.unoAlert = { ownerId: owner.id, timestamp: Date.now(), resolved: false };
+            if (room.unoTimer) { clearTimeout(room.unoTimer); room.unoTimer = null; }
+            room.unoTimer = setTimeout(() => {
+              // if still unresolved after timeout, resolve without penalty
+              if (room.unoAlert && !room.unoAlert.resolved) {
+                room.unoAlert.resolved = true;
+                io.to(code).emit('uno_resolved', { ownerId: owner.id, by: null, penalty: false });
+                room.unoTimer = null;
+              }
+            }, UNO_TIMEOUT);
           }
+
+          // verificar vitória: jogador sem cartas
+          const winner = room.state.players.find(p => p.hand.length === 0);
+          if (winner) {
+            room.winner = winner.id;
+            io.to(code).emit('game_over', { winnerId: winner.id });
+            // cleanup: end current game so a new one can only be iniciado pela tela principal (owner)
+            room.state = null;
+            room.pending = null;
+            if (room.unoTimer) { clearTimeout(room.unoTimer); room.unoTimer = null; }
+          }
+
           if (cb) cb({ ok: true });
         } catch (err) {
           if (cb) cb({ error: err.message });
@@ -79,6 +120,12 @@ export default function handler(req, res) {
         } else {
           // draw normal count (default 1)
           const cards = drawCards(room.state, playerId, count || 1);
+          // advance the turn only if the drawer was the current player
+          const idx = room.state.players.findIndex(p => p.id === playerId);
+          const priorCurrent = room.state.current;
+          if (idx !== -1 && priorCurrent === idx) {
+            room.state.current = (room.state.current + room.state.direction + room.state.players.length) % room.state.players.length;
+          }
           io.to(code).emit('state_update', room.state);
           if (cb) cb({ cards });
         }
@@ -92,10 +139,12 @@ export default function handler(req, res) {
 
       socket.on('press_uno', ({ code, pressedBy }, cb) => {
         const room = games.get(code);
-        if (!room || !room.state) return cb && cb({ error: 'no game' });
+        if (!room) return cb && cb({ error: 'room not found' });
         const alert = room.unoAlert;
         if (!alert || alert.resolved) return cb && cb({ error: 'no uno alert' });
         const ownerId = alert.ownerId;
+        // cancel server timeout
+        if (room.unoTimer) { clearTimeout(room.unoTimer); room.unoTimer = null; }
         if (pressedBy === ownerId) {
           // owner pressed their own uno (valid) -> resolve without penalty
           alert.resolved = true;
@@ -103,6 +152,11 @@ export default function handler(req, res) {
           return cb && cb({ ok: true });
         }
         // another player pressed first -> owner compra 2
+        if (!room.state) {
+          // if game already ended, nothing to do
+          alert.resolved = true;
+          return cb && cb({ error: 'no game' });
+        }
         const cards = drawCards(room.state, ownerId, 2);
         alert.resolved = true;
         io.to(code).emit('state_update', room.state);

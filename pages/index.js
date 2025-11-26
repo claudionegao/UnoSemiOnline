@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
+import { useRouter } from 'next/router';
 import dynamic from 'next/dynamic';
 import Card from '../components/Card';
 
@@ -9,8 +10,21 @@ export default function TableView() {
   const [players, setPlayers] = useState([]);
   const [state, setState] = useState(null);
   const [unoAlert, setUnoAlert] = useState(null);
+  const [showWinnerModal, setShowWinnerModal] = useState(false);
+  const [winnerId, setWinnerId] = useState(null);
 
   useEffect(() => {
+    // redirect mobile users to /join to enter room code
+    const routerRedirect = () => {
+      try {
+        if (typeof navigator === 'undefined') return false;
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        if (isMobile) router.replace('/join');
+      } catch (e) {}
+    };
+
+    routerRedirect();
+
     let mounted = true;
     import('socket.io-client').then(({ io }) => {
       if (!mounted) return;
@@ -22,7 +36,13 @@ export default function TableView() {
       s.on('player_joined', ({ players }) => setPlayers(players));
       s.on('state_update', (st) => setState(st));
       s.on('uno_alert', ({ ownerId }) => setUnoAlert({ ownerId }));
-      s.on('uno_resolved', (info) => { setUnoAlert(null); alert(info.penalty ? `${info.ownerId} penalizado por UNO` : `${info.ownerId} fez UNO`); });
+      s.on('uno_resolved', (info) => { setUnoAlert(null); /* removed alert box for UNO */ });
+      s.on('game_over', ({ winnerId }) => {
+        // show winner modal and reset table state to waiting
+        setWinnerId(winnerId);
+        setShowWinnerModal(true);
+        setState(null);
+      });
     });
     return () => { mounted = false; if (socketRef.current) socketRef.current.close(); };
   }, []);
@@ -75,6 +95,19 @@ export default function TableView() {
       <div style={{ marginTop: 20 }}>
         <strong>Vez:</strong> {state && state.players ? state.players[state.current].name : '—'}
       </div>
+
+      {/* victory modal */}
+      {showWinnerModal && (
+        <div style={{ position:'fixed', left:0, top:0, right:0, bottom:0, display:'flex', alignItems:'center', justifyContent:'center', background:'rgba(0,0,0,0.5)' }}>
+          <div style={{ background:'#fff', padding:20, borderRadius:8, minWidth:300, textAlign:'center' }}>
+            <h2>Vitória!</h2>
+            <p>Jogador vencedor: <strong>{winnerId}</strong></p>
+            <div style={{ marginTop:12 }}>
+              <button onClick={() => { setShowWinnerModal(false); setWinnerId(null); }}>Fechar</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -48,10 +48,18 @@ export default function TableView() {
   }, []);
 
   function createRoom() {
+    if (!io) {
+      alert('Socket não conectado ainda. Aguarde alguns segundos e tente novamente.');
+      return;
+    }
     io.emit('create_room', (res) => {});
   }
 
   function startGame() {
+    if (!io) {
+      alert('Socket não conectado ainda. Aguarde alguns segundos e tente novamente.');
+      return;
+    }
     const ids = players.length ? players : ['P1', 'P2'];
     io.emit('start_game', { code: room, playerIds: ids });
   }

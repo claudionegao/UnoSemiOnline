@@ -1,7 +1,10 @@
 import { Server } from 'socket.io';
 const { initGame, drawCards, playCard } = require('../../lib/game');
 
-const games = new Map(); // roomCode -> { state, players: Map<socketId, playerId>, owner, unoAlert, unoTimer, winner }
+const games = new Map(); // roomCode -> { state, players: Map<socketId, playerId>, owner, unoAlert, unoTimer, winner, logs: [] }
+
+// expose games map for read-only inspection via other API routes
+global.unoGames = games;
 
 const UNO_TIMEOUT = 7000; // ms before UNO alert expires without penalty
 
@@ -17,10 +20,25 @@ export default function handler(req, res) {
     io.on('connection', socket => {
       socket.on('create_room', (cb) => {
         const code = makeCode();
-        games.set(code, { players: new Map(), state: null, owner: socket.id, unoAlert: null, unoTimer: null, winner: null });
+        games.set(code, { players: new Map(), state: null, owner: socket.id, unoAlert: null, unoTimer: null, winner: null, logs: [] });
         socket.join(code);
         socket.emit('created', { code });
         if (cb) cb({ code });
+      });
+
+      // receive logs from clients for server-side storage and debugging
+      socket.on('client_log', ({ code, level = 'info', msg = '', meta = {} }) => {
+        try {
+          const room = games.get(code);
+          const entry = { ts: Date.now(), from: socket.id, level, msg, meta };
+          if (room) {
+            room.logs = room.logs || [];
+            room.logs.push(entry);
+          }
+          console.log(`[client_log][${code}]`, level, msg, meta);
+        } catch (e) {
+          console.log('[client_log] failed to store log', e && e.message);
+        }
       });
 
       socket.on('join_room', ({ code, playerId, name }, cb) => {

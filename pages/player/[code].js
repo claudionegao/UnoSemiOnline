@@ -61,16 +61,21 @@ export default function PlayerView() {
 
           if (!hasPlayable) {
             lastAutoActionRef.current = st.current;
-            console.log('[auto-action] player', playerId, 'turn', st.current, pending.amount > 0 ? `accept ${pending.amount}` : 'draw 1');
+            const actionMsg = pending.amount > 0 ? `accept ${pending.amount}` : 'draw 1';
+            // send log to server for storage and console
+            s.emit('client_log', { code, level: 'info', msg: `[auto-action] ${actionMsg}`, meta: { playerId, turn: st.current } });
             if (pending.amount > 0) {
               // accept penalty via socket
               s.emit('draw_card', { code, playerId, count: 0 }, (res) => {});
             } else {
               s.emit('draw_card', { code, playerId, count: 1 }, (res) => {});
             }
+          } else {
+            // log that auto-action did not run because player has playable cards
+            s.emit('client_log', { code, level: 'debug', msg: '[auto-action] skipped, has playable', meta: { playerId, handSize: myHand.length, turn: st.current } });
           }
         } catch (e) {
-          console.log('[auto-action] error', e && e.message);
+          s.emit('client_log', { code, level: 'error', msg: '[auto-action] error', meta: { err: e && e.message } });
         }
       };
 
@@ -157,7 +162,7 @@ export default function PlayerView() {
     if (!state) {
       lastAutoActionRef.current = null;
       lastSeenCurrentRef.current = null;
-      console.log('[auto-action] reset markers because state is null');
+      if (socket && socket.emit) socket.emit('client_log', { code, level: 'info', msg: '[auto-action] reset markers because state is null' });
     }
   }, [state]);
 

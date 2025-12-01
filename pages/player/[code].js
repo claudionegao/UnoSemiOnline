@@ -23,7 +23,10 @@ export default function PlayerView() {
     if (!code) return;
     let s;
     import('socket.io-client').then(({ io }) => {
-      s = io(undefined, { path: '/api/socket' });
+      const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || undefined;
+      // if NEXT_PUBLIC_SOCKET_URL is set (external socket server), connect to it;
+      // otherwise connect to the same origin API route used in local dev
+      s = io(socketUrl, { path: socketUrl ? undefined : '/api/socket' });
       setSocket(s);
 
       // helper to decide if a card is playable given a specific state object

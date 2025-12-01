@@ -13,6 +13,16 @@ function makeCode() {
 }
 
 export default function handler(req, res) {
+  // On serverless platforms like Vercel, starting a persistent Socket.IO server
+  // inside an API route is not supported. Detect Vercel and skip initialization
+  // so the function doesn't attempt to create a long-lived server there.
+  if (process.env.VERCEL) {
+    console.log('[socket] running on Vercel - socket server disabled in this environment');
+    res.statusCode = 501;
+    res.end('Socket server disabled on serverless platform.');
+    return;
+  }
+
   if (!res.socket.server.io) {
     const io = new Server(res.socket.server, { path: '/api/socket' });
     res.socket.server.io = io;

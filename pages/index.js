@@ -28,7 +28,8 @@ export default function TableView() {
     let mounted = true;
     import('socket.io-client').then(({ io }) => {
       if (!mounted) return;
-      const s = io(undefined, { path: '/api/socket' });
+      const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || undefined;
+      const s = io(socketUrl, { path: socketUrl ? undefined : '/api/socket' });
       socketRef.current = s;
       setIo(s);
 

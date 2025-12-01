@@ -29,12 +29,33 @@ export default function Card({ card, style, className }) {
 
   const label = card ? (card.type === 'number' ? `${card.value} ${card.color || ''}` : `${card.type} ${card.color || ''}`) : '';
 
-  // map card to filename convention used in assets: number_color.png, type_color.png, wild.png, wild_draw4.png
-  const filename = card
-    ? (card.type === 'number' ? `${card.value}_${card.color}` : (card.type === 'wild' || card.type === 'wild_draw4' ? `${card.type}` : `${card.type}_${card.color}`))
-    : 'back';
+  // map card to filename convention present in `public/assets/cards`:
+  // - Numbers: Color_Value => e.g. 'Blue_5.png'
+  // - Actions: Color_Draw, Color_Reverse, Color_Skip => e.g. 'Red_Draw.png'
+  // - Wilds: 'Wild.png' and 'Wild_Draw.png'
+  const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : '');
 
-  const src = `/assets/cards/${filename}.png`;
+  let filename;
+  if (!card) {
+    filename = null; // no image, fallback to colored box
+  } else if (card.type === 'number') {
+    filename = `${cap(card.color)}_${card.value}`;
+  } else if (card.type === 'draw2') {
+    filename = `${cap(card.color)}_Draw`;
+  } else if (card.type === 'reverse') {
+    filename = `${cap(card.color)}_Reverse`;
+  } else if (card.type === 'skip') {
+    filename = `${cap(card.color)}_Skip`;
+  } else if (card.type === 'wild') {
+    filename = `Wild`;
+  } else if (card.type === 'wild_draw4') {
+    filename = `Wild_Draw`;
+  } else {
+    // generic fallback using type and color
+    filename = card.color ? `${cap(card.color)}_${cap(card.type)}` : `${cap(card.type)}`;
+  }
+
+  const src = filename ? `/assets/cards/${filename}.png` : null;
 
   return (
     <CardBox title={label} className={className} style={{ background: !imgError ? undefined : bg, color: textColor, ...style }}>

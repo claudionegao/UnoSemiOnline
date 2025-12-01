@@ -54,9 +54,35 @@ export default function handler(req, res) {
       socket.on('join_room', ({ code, playerId, name }, cb) => {
         const room = games.get(code);
         if (!room) return cb && cb({ error: 'room not found' });
-        room.players.set(socket.id, playerId || socket.id);
+        // If the client provided a playerId, try to re-associate that playerId
+        // to the new socket. Remove any previous socket mapping for that playerId
+        // so reconnections preserve the player's hand in `room.state`.
+        if (playerId) {
+          // remove any previous socket that referenced this playerId
+          for (const [sId, pId] of room.players.entries()) {
+            if (pId === playerId && sId !== socket.id) {
+              room.players.delete(sId);
+            }
+          }
+          room.players.set(socket.id, playerId);
+        } else {
+          // no playerId provided: register by socket id
+          room.players.set(socket.id, socket.id);
+        }
         socket.join(code);
-        io.to(code).emit('player_joined', { players: Array.from(room.players.values()) });
+        // If a game is active, mark player as connected in the game state
+        if (room.state && room.state.players) {
+          const p = room.state.players.find(px => px.id === (playerId || socket.id));
+          if (p) {
+            p.connected = true;
+            if (name) p.name = name;
+          }
+          // broadcast updated state so clients see the connection status
+          io.to(code).emit('state_update', room.state);
+        } else {
+          // lobby: notify the updated players list
+          io.to(code).emit('player_joined', { players: Array.from(room.players.values()) });
+        }
         if (cb) cb({ ok: true });
       });
 
@@ -71,6 +97,15 @@ export default function handler(req, res) {
         // initialize game state (derive players from room.players by default)
         const ids = playerIds && playerIds.length ? playerIds : Array.from(room.players.values());
         room.state = initGame(ids);
+        // mark connection status on players according to presence in room.players
+        try {
+          const presentIds = Array.from(room.players.values());
+          room.state.players.forEach(p => {
+            p.connected = presentIds.includes(p.id);
+          });
+        } catch (e) {
+          // ignore
+        }
         // log initial top card for debugging / verification
         try {
           const top = room.state && room.state.discard && room.state.discard[room.state.discard.length - 1];
@@ -130,12 +165,14 @@ export default function handler(req, res) {
       });
 
       socket.on('draw_card', ({ code, playerId, count }, cb) => {
+        console.log('[draw_card] received', { code, playerId, count, socketId: socket.id });
         const room = games.get(code);
         if (!room || !room.state) return cb && cb({ error: 'no game' });
         const pending = room.state.pendingDraw || { type: null, amount: 0 };
         if (pending.amount > 0 && (!count || count === 0)) {
           // jogador está resolvendo uma penalidade: desenha o total pendente e perde a vez
           const cards = drawCards(room.state, playerId, pending.amount);
+          console.log('[draw_card] applied penalty draw', { code, playerId, amount: pending.amount, cardsCount: cards.length });
           room.state.pendingDraw = { type: null, amount: 0 };
           // avançar a vez após aplicar penalidade
           // ensure current points to the player who was penalized, then move to next
@@ -149,6 +186,7 @@ export default function handler(req, res) {
         } else {
           // draw normal count (default 1)
           const cards = drawCards(room.state, playerId, count || 1);
+          console.log('[draw_card] normal draw', { code, playerId, count: count || 1, cardsCount: cards.length });
           // advance the turn only if the drawer was the current player
           const idx = room.state.players.findIndex(p => p.id === playerId);
           const priorCurrent = room.state.current;
@@ -194,8 +232,40 @@ export default function handler(req, res) {
       });
 
       socket.on('disconnecting', () => {
-        for (const code of Object.keys(socket.rooms)) {
-          // nothing for now
+        // When a socket disconnects, remove its mapping from any room.players maps
+        // For lobby (no active game): remove the player from the list and notify lobby
+        // For active game: mark the player as disconnected in the game state (keep their hand)
+        for (const code of socket.rooms) {
+          if (code === socket.id) continue; // skip the socket's own room
+          const room = games.get(code);
+          if (!room || !room.players) continue;
+          const playerId = room.players.get(socket.id);
+          // remove socket->player mapping in both cases
+          if (playerId) room.players.delete(socket.id);
+
+          if (!room.state) {
+            // lobby: the player fully leaves the waiting list
+            try {
+              // if the leaving socket was the room owner, try to reassign
+              if (room.owner === socket.id) {
+                const next = room.players && room.players.size ? Array.from(room.players.keys())[0] : null;
+                room.owner = next;
+              }
+              io.to(code).emit('player_joined', { players: Array.from(room.players.values()) });
+            } catch (e) {
+              // best-effort
+            }
+          } else {
+            // game in progress: mark player as disconnected but keep their hand/state
+            try {
+              const p = room.state.players && room.state.players.find(px => px.id === playerId);
+              if (p) p.connected = false;
+              io.to(code).emit('state_update', room.state);
+              io.to(code).emit('player_disconnected', { playerId });
+            } catch (e) {
+              // best-effort
+            }
+          }
         }
       });
     });

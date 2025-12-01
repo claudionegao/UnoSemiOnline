@@ -19,6 +19,7 @@ export default function PlayerView() {
   const audioCtxRef = useRef(null);
   const lastAutoActionRef = useRef(null);
   const lastSeenCurrentRef = useRef(null);
+  const latestStateRef = useRef(null);
 
   useEffect(() => {
     if (!code) return;
@@ -30,65 +31,30 @@ export default function PlayerView() {
       s = io(socketUrl, { path: socketUrl ? undefined : '/api/socket' });
       setSocket(s);
 
-      // helper to decide if a card is playable given a specific state object
-      const isCardPlayableForState = (card, st) => {
-        if (!st) return false;
-        const top = st.discard && st.discard[st.discard.length - 1];
-        const pending = st.pendingDraw || { type: null, amount: 0 };
-        if (pending.amount > 0) return card.type === pending.type;
-        if (card.type === 'wild' || card.type === 'wild_draw4') return true;
-        if (!top) return true;
-        if (card.color && top.color && card.color === top.color) return true;
-        if (card.type === 'number' && top.type === 'number' && card.value === top.value) return true;
-        if (card.type === top.type && card.type !== 'number') return true;
-        return false;
-      };
-
-      const tryAutoAction = (st) => {
-        try {
-          if (!st || !playerId) return;
-          const myIdx = st.players.findIndex(p => p.id === playerId);
-          if (myIdx === -1) return;
-          if (myIdx !== st.current) return; // not your turn
-
-          const pending = st.pendingDraw || { type: null, amount: 0 };
-          const myHand = st.players[myIdx].hand || [];
-          const hasPlayable = myHand.some(c => isCardPlayableForState(c, st));
-
-          // reset auto-action marker when turn index changes
-          if (lastSeenCurrentRef.current !== st.current) {
-            lastAutoActionRef.current = null;
-            lastSeenCurrentRef.current = st.current;
-          }
-
-          if (lastAutoActionRef.current === st.current) return;
-
-          if (!hasPlayable) {
-            lastAutoActionRef.current = st.current;
-            const actionMsg = pending.amount > 0 ? `accept ${pending.amount}` : 'draw 1';
-            // send log to server for storage and console
-            s.emit('client_log', { code, level: 'info', msg: `[auto-action] ${actionMsg}`, meta: { playerId, turn: st.current } });
-            if (pending.amount > 0) {
-              // accept penalty via socket
-              s.emit('draw_card', { code, playerId, count: 0 }, (res) => {});
-            } else {
-              s.emit('draw_card', { code, playerId, count: 1 }, (res) => {});
-            }
-          } else {
-            // log that auto-action did not run because player has playable cards
-            s.emit('client_log', { code, level: 'debug', msg: '[auto-action] skipped, has playable', meta: { playerId, handSize: myHand.length, turn: st.current } });
-          }
-        } catch (e) {
-          s.emit('client_log', { code, level: 'error', msg: '[auto-action] error', meta: { err: e && e.message } });
+      // attempt automatic rejoin if we have a stored playerId for this room
+      try {
+        const stored = window.localStorage.getItem(`uno_player_${code}`);
+        if (stored) {
+          setPlayerId(stored);
+          // join with stored id and request current state
+          s.emit('join_room', { code, playerId: stored, name: stored }, (res) => {
+            s.emit('get_state', { code }, (r) => { if (r.state) setState(r.state); });
+          });
         }
-      };
+      } catch (e) {
+        // ignore localStorage errors
+      }
 
       s.on('state_update', st => {
+        latestStateRef.current = st;
         setState(st);
-        tryAutoAction(st);
       });
 
       s.on('player_joined', ({ players }) => setPlayersList(players || []));
+      s.on('player_disconnected', ({ playerId }) => {
+        // if we're in the lobby view, remove from playersList; otherwise state_update will reflect it
+        setPlayersList(prev => prev.filter(p => p !== playerId));
+      });
       s.on('uno_alert', ({ ownerId }) => setUnoAlert({ ownerId }));
       s.on('uno_resolved', (info) => { setUnoAlert(null); /* removed alert box for UNO */ });
       s.on('game_over', ({ winnerId }) => {
@@ -130,8 +96,16 @@ export default function PlayerView() {
 
   // Auto-action: if it's your turn and the only options are to draw or accept penalty, do it once
   useEffect(() => {
-    if (!state || !playerId || !socket) return;
+    if (!state || !playerId || !socket) {
+      // debug
+      console.log('[auto-action] skipping because missing', { hasState: !!state, playerId, hasSocket: !!socket });
+      return;
+    }
+
+    console.log('[auto-action] evaluating', { playerId, current: state.current, players: state.players.map(p=>({id:p.id, name:p.name, hand:p.hand.length})) });
+
     const myIdx = state.players.findIndex(p => p.id === playerId);
+    if (myIdx === -1) return; // not in players
     if (myIdx !== state.current) return; // not your turn
 
     const pending = state.pendingDraw || { type: null, amount: 0 };
@@ -147,17 +121,39 @@ export default function PlayerView() {
     // If we've already auto-acted for this current turn, skip
     if (lastAutoActionRef.current === state.current) return;
 
-    // If no playable cards, automatically draw or accept penalty
+    // If no playable cards, automatically draw or accept penalty after a short delay
     if (!hasPlayable) {
-      lastAutoActionRef.current = state.current;
-      console.log('[auto-action] player', playerId, 'turn', state.current, pending.amount > 0 ? `accept ${pending.amount}` : 'draw 1');
-      if (pending.amount > 0) {
-        // accept penalty
-        resolvePendingDraw();
-      } else {
-        // draw one card
-        draw();
-      }
+      // schedule action after slight delay to avoid racing with in-flight updates
+      const timer = setTimeout(() => {
+        try {
+          if (!socket) return;
+          // get freshest state from ref (avoid stale closure)
+          const fresh = latestStateRef.current || state;
+          const curIdx = (fresh.players || []).findIndex(p => p.id === playerId);
+          if (curIdx !== fresh.current) {
+            console.log('[auto-action] aborted - turn changed', { curIdx, expected: fresh.current });
+            return;
+          }
+
+          lastAutoActionRef.current = fresh.current;
+          const actionMsg = pending.amount > 0 ? `accept ${pending.amount}` : 'draw 1';
+          // send debug log to server
+          try { socket.emit('client_log', { code, level: 'info', msg: `[auto-action] ${actionMsg}`, meta: { playerId, turn: state.current } }); } catch (e) {}
+          console.log('[auto-action] performing', { actionMsg, playerId, turn: state.current, pending });
+
+          if (pending.amount > 0) {
+            // accept penalty
+            resolvePendingDraw();
+          } else {
+            // draw one card
+            draw();
+          }
+        } catch (e) {
+          try { socket.emit('client_log', { code, level: 'error', msg: '[auto-action] error', meta: { err: e && e.message } }); } catch (e) {}
+        }
+      }, 900);
+
+      return () => clearTimeout(timer);
     }
   }, [state, playerId, socket]);
 
@@ -173,6 +169,7 @@ export default function PlayerView() {
   function join() {
     const id = name || `P-${Math.floor(Math.random()*1000)}`;
     setPlayerId(id);
+    try { window.localStorage.setItem(`uno_player_${code}`, id); } catch(e) {}
     socket.emit('join_room', { code, playerId: id, name: id }, (res) => {
       // after join ask for state
       socket.emit('get_state', { code }, (r) => { if (r.state) setState(r.state); });
@@ -248,17 +245,55 @@ export default function PlayerView() {
   function draw() {
     // se houver pendingDraw no state, chamar draw_card sem count para que o servidor aplique a penalidade acumulada
     if (!socket) return;
-    socket.emit('draw_card', { code, playerId, count: 1 }, (res) => {});
+    console.log('[draw] emitting draw_card count=1', { code, playerId });
+    try { socket.emit('client_log', { code, level: 'info', msg: '[draw] request draw 1', meta: { playerId } }); } catch(e){}
+    const priorCurrent = (latestStateRef.current && latestStateRef.current.current) || (state && state.current);
+    socket.emit('draw_card', { code, playerId, count: 1 }, (res) => {
+      console.log('[draw] res', res);
+      try { socket.emit('client_log', { code, level: 'info', msg: '[draw] response', meta: { res } }); } catch(e){}
+      // request fresh state after draw to avoid missed state_update races (with retries)
+      try {
+        fetchStateWithRetries(priorCurrent).then(() => {});
+      } catch(e){}
+    });
   }
 
   // função pra resolver penalidade (quando existe pendingDraw): chama draw_card sem count
   function resolvePendingDraw() {
     if (!socket) return;
-    socket.emit('draw_card', { code, playerId, count: 0 }, (res) => {});
+    console.log('[resolvePendingDraw] emitting draw_card count=0', { code, playerId });
+    try { socket.emit('client_log', { code, level: 'info', msg: '[resolvePendingDraw] request draw 0', meta: { playerId } }); } catch(e){}
+    const priorCurrent2 = (latestStateRef.current && latestStateRef.current.current) || (state && state.current);
+    socket.emit('draw_card', { code, playerId, count: 0 }, (res) => {
+      console.log('[resolvePendingDraw] res', res);
+      try { socket.emit('client_log', { code, level: 'info', msg: '[resolvePendingDraw] response', meta: { res } }); } catch(e){}
+      // request fresh state after resolving penalty (with retries)
+      try {
+        fetchStateWithRetries(priorCurrent2).then(() => {});
+      } catch(e){}
+    });
+  }
+
+  // helper to fetch latest state with limited retries when prior current index did not advance
+  function fetchStateWithRetries(priorCurrent, maxRetries = 2, delay = 700) {
+    return new Promise((resolve) => {
+      let attempts = 0;
+      const tryFetch = () => {
+        socket.emit('get_state', { code }, (r) => {
+          if (r && r.state) { latestStateRef.current = r.state; setState(r.state); }
+          const newC = r && r.state ? r.state.current : (latestStateRef.current && latestStateRef.current.current);
+          if (typeof priorCurrent === 'undefined' || newC !== priorCurrent) return resolve(r && r.state ? r.state : latestStateRef.current);
+          attempts++;
+          if (attempts > maxRetries) return resolve(r && r.state ? r.state : latestStateRef.current);
+          setTimeout(tryFetch, delay);
+        });
+      };
+      tryFetch();
+    });
   }
 
   return (
-    <div style={{ padding: 16 }}>
+    <div style={{ minHeight: '100vh', padding: 16 }}>
       <h1>Jogador — Sala {code}</h1>
       {!playerId && (
         <div>
@@ -281,11 +316,27 @@ export default function PlayerView() {
       {playerId && (
         <div style={{ marginTop: 12 }}>
           <h4>Jogadores conectados</h4>
-          <ul>
-            {playersList.map((p, i) => (
-              <li key={i}>{i + 1}. {p}</li>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            {state && state.players ? state.players.map((p, i) => (
+              <div key={p.id} style={{ width: 140, minHeight: 56, borderRadius: 8, padding: 8, background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.06)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ width: 36, height: 36, borderRadius: 18, background: p.connected === false ? '#ddd' : '#5cb85c', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>{p.name ? p.name.charAt(0).toUpperCase() : '?'}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{p.name}{p.connected === false ? ' • desconectado' : ''}</div>
+                  <div style={{ fontSize: 12, color: '#666' }}>{p.hand.length} cartas</div>
+                </div>
+                <div style={{ fontSize: 11, background: '#f7f7f7', padding: '4px 6px', borderRadius: 6 }}>{i + 1}</div>
+              </div>
+            )) : playersList.map((p, i) => (
+              <div key={i} style={{ width: 140, minHeight: 56, borderRadius: 8, padding: 8, background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.06)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ width: 36, height: 36, borderRadius: 18, background: '#8c8c8c', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>{String(p).charAt(0).toUpperCase()}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{p}</div>
+                  <div style={{ fontSize: 12, color: '#666' }}>aguardando</div>
+                </div>
+                <div style={{ fontSize: 11, background: '#f7f7f7', padding: '4px 6px', borderRadius: 6 }}>{i + 1}</div>
+              </div>
             ))}
-          </ul>
+          </div>
           {/* show Start button when this player is the first in the list (menor número) and no game active */}
           {playersList.length > 0 && playersList[0] === playerId && !state && (
             <div style={{ marginTop: 8 }}>
@@ -309,23 +360,28 @@ export default function PlayerView() {
         <>
           <div><strong>Vez:</strong> {state.players[state.current].name}</div>
               <div style={{ marginTop: 12 }}>
+                <h3>Pilha de descarte</h3>
+                <div style={{ marginBottom: 8 }}>
+                  {state.discard && (
+                    <div style={{ display: 'inline-block', width: 60 }}>
+                      <Card card={state.discard[state.discard.length - 1]} style={{ width: 60, height: 84 }} />
+                    </div>
+                  )}
+                </div>
                 <h3>Sua mão</h3>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {state.players.find(p=>p.id===playerId)?.hand.map((c, i) => {
-                        const playable = isCardPlayable(c);
-                        const myIdx = state.players.findIndex(p => p.id === playerId);
-                        const isMyTurn = myIdx === state.current;
-                        const highlight = isMyTurn && playable;
-                        // only dim (apagar) cards when it IS your turn; when not your turn, keep full opacity
-                        const dim = isMyTurn ? !playable : false;
-
-                        const label = c.type === 'number' ? `${c.value} ${c.color || ''}` : `${c.type} ${c.color || ''}`;
-                        return (
-                          <div key={i} style={{ cursor: playable && isMyTurn ? 'pointer' : 'default' }} onClick={() => handleCardClick(c)}>
-                            <Card card={c} style={{ width:72, height:100, borderRadius:8, display:'block', boxShadow: highlight ? '0 0 12px rgba(255,255,0,0.9)' : '0 2px 6px rgba(0,0,0,0.2)', transform: highlight ? 'translateY(-4px)' : 'none', transition: 'all 120ms ease', opacity: dim ? 0.35 : 1, filter: dim ? 'brightness(0.5) contrast(0.9)' : 'none' }} />
-                          </div>
-                        );
-                      })}
+                    const playable = isCardPlayable(c);
+                    const myIdx = state.players.findIndex(p => p.id === playerId);
+                    const isMyTurn = myIdx === state.current;
+                    const highlight = isMyTurn && playable;
+                    const dim = isMyTurn ? !playable : false;
+                    return (
+                      <div key={i} onClick={() => handleCardClick(c)} style={{ cursor: playable && isMyTurn ? 'pointer' : 'default' }}>
+                        <Card card={c} style={{ width:72, height:100, borderRadius:8, boxShadow: highlight ? '0 0 8px rgba(0,150,255,0.8)' : '0 2px 4px rgba(0,0,0,0.1)', opacity: dim ? 0.5 : 1 }} />
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 

@@ -27,13 +27,15 @@ export default function Join() {
   }
 
   return (
-    <div style={{ padding: 20 }}>
-      <h1>Entrar em sala</h1>
-      <form onSubmit={submit}>
-        <input value={code} onChange={e => setCode(e.target.value)} placeholder="Código da sala" style={{ padding: 8, fontSize: 16, textTransform: 'uppercase' }} />
-        <button style={{ marginLeft: 8 }} onClick={submit}>Entrar</button>
-      </form>
-      <p style={{ marginTop: 12 }}>Se você estiver em um dispositivo móvel e acessar esta página com `?code=XXXXX` na URL, você será redirecionado automaticamente para a tela do jogador.</p>
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+      <div style={{ width: '100%', maxWidth: 480 }}>
+        <h1 style={{ textAlign: 'center' }}>Entrar em sala</h1>
+        <form onSubmit={submit} style={{ display: 'flex', justifyContent: 'center', gap: 8 }}>
+          <input value={code} onChange={e => setCode(e.target.value)} placeholder="Código da sala" style={{ padding: 8, fontSize: 16, textTransform: 'uppercase', flex: 1 }} />
+          <button style={{ padding: '8px 12px' }} onClick={submit}>Entrar</button>
+        </form>
+        <p style={{ marginTop: 12, textAlign: 'center' }}>Se você estiver em um dispositivo móvel e acessar esta página com `?code=XXXXX` na URL, você será redirecionado automaticamente para a tela do jogador.</p>
+      </div>
     </div>
   );
 }

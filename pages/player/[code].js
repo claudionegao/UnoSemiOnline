@@ -1,5 +1,6 @@
 import { useRouter } from 'next/router';
 import { useEffect, useState, useRef } from 'react';
+import Card from '../../components/Card';
 
 export default function PlayerView() {
   const router = useRouter();
@@ -318,19 +319,10 @@ export default function PlayerView() {
                         // only dim (apagar) cards when it IS your turn; when not your turn, keep full opacity
                         const dim = isMyTurn ? !playable : false;
 
-                        // map color names to nicer backgrounds and pick readable text color
-                        let bg = '#333';
-                        if (c.color === 'red') bg = '#d9534f';
-                        else if (c.color === 'green') bg = '#5cb85c';
-                        else if (c.color === 'blue') bg = '#0275d8';
-                        else if (c.color === 'yellow') bg = '#f0ad4e';
-
-                        const textColor = c.color === 'yellow' ? '#222' : '#fff';
-
                         const label = c.type === 'number' ? `${c.value} ${c.color || ''}` : `${c.type} ${c.color || ''}`;
                         return (
                           <div key={i} style={{ cursor: playable && isMyTurn ? 'pointer' : 'default' }} onClick={() => handleCardClick(c)}>
-                            <div title={label} style={{ width:72, height:100, borderRadius:8, background: bg, color: textColor, display:'flex',alignItems:'center',justifyContent:'center', boxShadow: highlight ? '0 0 12px rgba(255,255,0,0.9)' : '0 2px 6px rgba(0,0,0,0.2)', transform: highlight ? 'translateY(-4px)' : 'none', transition: 'all 120ms ease', opacity: dim ? 0.35 : 1, filter: dim ? 'brightness(0.5) contrast(0.9)' : 'none' }}>{c.type==='number'?c.value:c.type}</div>
+                            <Card card={c} style={{ width:72, height:100, borderRadius:8, display:'block', boxShadow: highlight ? '0 0 12px rgba(255,255,0,0.9)' : '0 2px 6px rgba(0,0,0,0.2)', transform: highlight ? 'translateY(-4px)' : 'none', transition: 'all 120ms ease', opacity: dim ? 0.35 : 1, filter: dim ? 'brightness(0.5) contrast(0.9)' : 'none' }} />
                           </div>
                         );
                       })}

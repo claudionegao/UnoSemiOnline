@@ -1,274 +1,565 @@
-import { Server } from 'socket.io';
-const { initGame, drawCards, playCard } = require('../../lib/game');
+import { Server } from "socket.io";
+import { initializeGame, drawCard, isValidPlay, getDefensiveDrawCards, isDrawCard, calculateDrawPenalty } from "../../lib/unoGame.js";
 
-const games = new Map(); // roomCode -> { state, players: Map<socketId, playerId>, owner, unoAlert, unoTimer, winner, logs: [] }
+let clientSockets = [];
+let rooms = [
+  {nome: 'sala do Alice', id: 1, clients: [], players: [], countdown: null, gameState: null},
+  {nome: 'sala do Bob', id: 2, clients: [], players: [], countdown: null, gameState: null},
+  {nome: 'sala do Carol', id: 3, clients: [], players: [], countdown: null, gameState: null},
+];
 
-// expose games map for read-only inspection via other API routes
-global.unoGames = games;
+// Processa efeitos de cartas especiais
+function processCardEffect(gameState, card, io, roomId) {
+  const { value } = card;
+  
+  if (value === "Skip") {
+    // Pula o próximo jogador
+    gameState.currentPlayerIndex = 
+      (gameState.currentPlayerIndex + gameState.direction + gameState.players.length) 
+      % gameState.players.length;
+  } else if (value === "Reverse") {
+    // Inverte a direção
+    gameState.direction *= -1;
+  } else if (value === "Draw" || value === "WDraw") {
+    // Acumula penalidade de draw
+    const drawAmount = calculateDrawPenalty(card);
+    gameState.pendingDraws = (gameState.pendingDraws || 0) + drawAmount;
+    
+    // Próximo jogador
+    const nextPlayerIndex = 
+      (gameState.currentPlayerIndex + gameState.direction + gameState.players.length) 
+      % gameState.players.length;
+    const nextPlayer = gameState.players[nextPlayerIndex];
+    
+    // Verifica se próximo jogador pode defender
+    const defensiveCards = getDefensiveDrawCards(nextPlayer.hand, card);
+    
+    if (defensiveCards.length > 0) {
+      console.log(`🛡️ Jogador ${nextPlayer.id} pode defender com ${defensiveCards.length} cartas`);
+      
+      // Envia opções de defesa para o próximo jogador
+      io.to(nextPlayer.id).emit("drawDefenseOptions", {
+        defensiveCards,
+        pendingDraws: gameState.pendingDraws,
+        attackCard: card
+      });
+      
+      // Marca que está esperando defesa
+      gameState.waitingForDefense = true;
+      gameState.defensePlayerId = nextPlayer.id;
+    } else {
+      // Jogador não pode defender, compra todas as cartas
+      console.log(`💥 Jogador ${nextPlayer.id} vai comprar ${gameState.pendingDraws} cartas`);
+      applyDrawPenalty(gameState, nextPlayerIndex);
+    }
+  }
+}
 
-const UNO_TIMEOUT = 7000; // ms before UNO alert expires without penalty
-
-function makeCode() {
-  return Math.random().toString(36).slice(2, 7).toUpperCase();
+// Aplica penalidade de comprar cartas
+function applyDrawPenalty(gameState, playerIndex) {
+  const player = gameState.players[playerIndex];
+  const drawCount = gameState.pendingDraws || 0;
+  
+  for (let i = 0; i < drawCount; i++) {
+    const drawnCard = drawCard(gameState.deck);
+    if (drawnCard) {
+      player.hand.push(drawnCard);
+      player.cardCount++;
+    }
+  }
+  
+  // Reseta penalidade
+  gameState.pendingDraws = 0;
+  gameState.waitingForDefense = false;
+  gameState.defensePlayerId = null;
+  
+  // Pula a vez do jogador que comprou
+  gameState.currentPlayerIndex = 
+    (playerIndex + gameState.direction + gameState.players.length) 
+    % gameState.players.length;
 }
 
 export default function handler(req, res) {
-  // On serverless platforms like Vercel, starting a persistent Socket.IO server
-  // inside an API route is not supported. Detect Vercel and skip initialization
-  // so the function doesn't attempt to create a long-lived server there.
-  if (process.env.VERCEL) {
-    console.log('[socket] running on Vercel - socket server disabled in this environment');
-    res.statusCode = 501;
-    res.end('Socket server disabled on serverless platform.');
+  if (res.socket.server.io) {
+    console.log("Socket.io já está inicializado");
+    res.end();
     return;
   }
 
-  if (!res.socket.server.io) {
-    const io = new Server(res.socket.server, { path: '/api/socket' });
-    res.socket.server.io = io;
+  const io = new Server(res.socket.server, { 
+    path: '/api/socket',
+    addTrailingSlash: false
+  });
 
-    io.on('connection', socket => {
-      socket.on('create_room', (cb) => {
-        const code = makeCode();
-        games.set(code, { players: new Map(), state: null, owner: socket.id, unoAlert: null, unoTimer: null, winner: null, logs: [] });
-        socket.join(code);
-        socket.emit('created', { code });
-        if (cb) cb({ code });
-      });
+  res.socket.server.io = io;
 
-      // receive logs from clients for server-side storage and debugging
-      socket.on('client_log', ({ code, level = 'info', msg = '', meta = {} }) => {
-        try {
-          const room = games.get(code);
-          const entry = { ts: Date.now(), from: socket.id, level, msg, meta };
-          if (room) {
-            room.logs = room.logs || [];
-            room.logs.push(entry);
-          }
-          console.log(`[client_log][${code}]`, level, msg, meta);
-        } catch (e) {
-          console.log('[client_log] failed to store log', e && e.message);
-        }
-      });
+  io.on("connection", (socket) => {
+    console.log("Cliente conectado:", socket.id);
+    console.log("Salas atuais para enviar:", rooms);
+    clientSockets.push(socket);
+    
+    // Envia as salas existentes para o cliente que acabou de conectar
+    socket.emit("updateRooms", { rooms: rooms });
+    console.log("updateRooms enviado para cliente:", socket.id);
 
-      socket.on('join_room', ({ code, playerId, name }, cb) => {
-        const room = games.get(code);
-        if (!room) return cb && cb({ error: 'room not found' });
-        // If the client provided a playerId, try to re-associate that playerId
-        // to the new socket. Remove any previous socket mapping for that playerId
-        // so reconnections preserve the player's hand in `room.state`.
-        if (playerId) {
-          // remove any previous socket that referenced this playerId
-          for (const [sId, pId] of room.players.entries()) {
-            if (pId === playerId && sId !== socket.id) {
-              room.players.delete(sId);
-            }
-          }
-          room.players.set(socket.id, playerId);
-        } else {
-          // no playerId provided: register by socket id
-          room.players.set(socket.id, socket.id);
-        }
-        socket.join(code);
-        // If a game is active, mark player as connected in the game state
-        if (room.state && room.state.players) {
-          const p = room.state.players.find(px => px.id === (playerId || socket.id));
-          if (p) {
-            p.connected = true;
-            if (name) p.name = name;
-          }
-          // broadcast updated state so clients see the connection status
-          io.to(code).emit('state_update', room.state);
-        } else {
-          // lobby: notify the updated players list
-          io.to(code).emit('player_joined', { players: Array.from(room.players.values()) });
-        }
-        if (cb) cb({ ok: true });
-      });
+    // adiciona um listener para criar salas
+    socket.on("criarSala", (nomeSala, callback) => {
+      const salaExiste = rooms.find(r => r.nome === nomeSala);
+      if (!salaExiste) {
+        const novaSala = {
+          nome: nomeSala, 
+          id: rooms.length + 1, 
+          clients: [], 
+          players: [], 
+          countdown: null
+        };
+        rooms.push(novaSala);
+        console.log(`Sala criada: ${nomeSala} por ${socket.id}`);
+        // Envia a lista atualizada de salas para TODOS os clientes
+        io.emit("updateRooms", { rooms: rooms });
+        // Chama o callback passando o ID da sala criada
+        if (callback) callback(novaSala.id);
+      } else {
+        socket.emit("erro", `A sala ${nomeSala} já existe.`);
+        if (callback) callback(null);
+      }
+    });
+    socket.on("entrarSala", (idSala, nome, callback) => {
+      console.log(`Tentando entrar na sala ${idSala} com nome ${nome}`);
+      const sala = rooms.find(room => room.id == idSala); // Usando == para comparar string com number
+      if (sala) {
+        // Adiciona o jogador à sala
+        if (!sala.players) sala.players = [];
+        const player = { id: socket.id, name: nome, ready: false };
+        sala.players.push(player);
+        
+        socket.join(`sala_${idSala}`);
+        console.log(`Cliente ${socket.id} (${nome}) entrou na sala ${sala.nome}`);
+        
+        // Envia atualização da sala para todos na sala
+        io.to(`sala_${idSala}`).emit("roomUpdate", {
+          players: sala.players,
+          roomName: sala.nome
+        });
+        
+        // Chama o callback confirmando a entrada
+        console.log(`Chamando callback com id: ${sala.id}`);
+        if (callback) callback(sala.id);
+      } else {
+        console.error(`Sala ${idSala} não encontrada`);
+        socket.emit("erro", `A sala com id ${idSala} não existe.`);
+        if (callback) callback(null);
+      }
+    });
 
-      socket.on('start_game', ({ code, playerIds }, cb) => {
-        const room = games.get(code);
-        if (!room) return cb && cb({ error: 'room not found' });
-        // only the room owner (main/table) or the first connected player can start a game
-        const firstSocketId = room.players && room.players.size ? Array.from(room.players.keys())[0] : null;
-        if (room.owner && socket.id !== room.owner && socket.id !== firstSocketId) return cb && cb({ error: 'only room owner or first player can start the game' });
-        // don't start if a game is already active
-        if (room.state) return cb && cb({ error: 'game already in progress' });
-        // initialize game state (derive players from room.players by default)
-        const ids = playerIds && playerIds.length ? playerIds : Array.from(room.players.values());
-        room.state = initGame(ids);
-        // mark connection status on players according to presence in room.players
-        try {
-          const presentIds = Array.from(room.players.values());
-          room.state.players.forEach(p => {
-            p.connected = presentIds.includes(p.id);
+    socket.on("toggleReady", (idSala) => {
+      const sala = rooms.find(room => room.id == idSala);
+      if (sala && sala.players) {
+        const player = sala.players.find(p => p.id === socket.id);
+        if (player) {
+          player.ready = !player.ready;
+          
+          // Envia atualização da sala
+          io.to(`sala_${idSala}`).emit("roomUpdate", {
+            players: sala.players,
+            roomName: sala.nome
           });
-        } catch (e) {
-          // ignore
-        }
-        // log initial top card for debugging / verification
-        try {
-          const top = room.state && room.state.discard && room.state.discard[room.state.discard.length - 1];
-          console.log(`[start_game] room=${code} initial_top=`, top);
-          // emit initial top card so test clients can observe it
-          io.to(code).emit('initial_top', top);
-        } catch (e) {
-          console.log('[start_game] failed to log initial top', e && e.message);
-        }
-        room.winner = null;
-        room.unoAlert = null;
-        if (room.unoTimer) { clearTimeout(room.unoTimer); room.unoTimer = null; }
-        io.to(code).emit('state_update', room.state);
-        if (cb) cb({ ok: true });
-      });
-
-      socket.on('play_card', ({ code, playerId, card, chosenColor }, cb) => {
-        const room = games.get(code);
-        if (!room || !room.state) return cb && cb({ error: 'no game' });
-        try {
-          const result = playCard(room.state, playerId, card, chosenColor);
-          io.to(code).emit('state_update', room.state);
-
-          // verificar UNO: jogador com 1 carta
-          const owner = room.state.players.find(p => p.id === playerId && p.hand.length === 1);
-          if (owner) {
-            // avisar a sala que este jogador está em UNO
-            io.to(code).emit('uno_alert', { ownerId: owner.id });
-            // setup server-side uno alert with timeout
-            room.unoAlert = { ownerId: owner.id, timestamp: Date.now(), resolved: false };
-            if (room.unoTimer) { clearTimeout(room.unoTimer); room.unoTimer = null; }
-            room.unoTimer = setTimeout(() => {
-              // if still unresolved after timeout, resolve without penalty
-              if (room.unoAlert && !room.unoAlert.resolved) {
-                room.unoAlert.resolved = true;
-                io.to(code).emit('uno_resolved', { ownerId: owner.id, by: null, penalty: false });
-                room.unoTimer = null;
-              }
-            }, UNO_TIMEOUT);
+          
+          // Se todos estiverem prontos e houver pelo menos 2 jogadores, inicia contagem
+          const allReady = sala.players.length >= 2 && sala.players.every(p => p.ready);
+          if (allReady && !sala.countdown) {
+            startCountdown(sala, idSala, io);
+          } else if (!allReady && sala.countdown) {
+            // Cancela contagem se alguém desmarcar ready
+            clearInterval(sala.countdown);
+            sala.countdown = null;
+            io.to(`sala_${idSala}`).emit("countdownCancelled");
           }
-
-          // verificar vitória: jogador sem cartas
-          const winner = room.state.players.find(p => p.hand.length === 0);
-          if (winner) {
-            room.winner = winner.id;
-            io.to(code).emit('game_over', { winnerId: winner.id });
-            // cleanup: end current game so a new one can only be iniciado pela tela principal (owner)
-            room.state = null;
-            room.pending = null;
-            if (room.unoTimer) { clearTimeout(room.unoTimer); room.unoTimer = null; }
-          }
-
-          if (cb) cb({ ok: true });
-        } catch (err) {
-          if (cb) cb({ error: err.message });
         }
+      }
+    });
+
+    socket.on("cancelCountdown", (idSala) => {
+      const sala = rooms.find(room => room.id == idSala);
+      if (sala && sala.countdown) {
+        clearInterval(sala.countdown);
+        sala.countdown = null;
+        // Desmarca ready de todos os jogadores
+        sala.players.forEach(p => p.ready = false);
+        io.to(`sala_${idSala}`).emit("countdownCancelled");
+        io.to(`sala_${idSala}`).emit("roomUpdate", {
+          players: sala.players,
+          roomName: sala.nome
+        });
+      }
+    });
+
+    socket.on("playCard", (data, callback) => {
+      const { roomId, card, declaredColor } = data;
+      const sala = rooms.find(room => room.id == roomId);
+      
+      if (!sala || !sala.gameState) {
+        if (callback) callback({ success: false, message: "Sala ou jogo não encontrado" });
+        return;
+      }
+      
+      const playerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
+      if (playerIndex === -1) {
+        if (callback) callback({ success: false, message: "Jogador não encontrado" });
+        return;
+      }
+      
+      // Verifica se é a vez do jogador
+      if (playerIndex !== sala.gameState.currentPlayerIndex) {
+        if (callback) callback({ success: false, message: "Não é sua vez" });
+        return;
+      }
+      
+      // Verifica se a jogada é válida
+      const isValid = isValidPlay(card, sala.gameState.topCard, sala.gameState.declaredColor);
+      if (!isValid) {
+        if (callback) callback({ success: false, message: "Jogada inválida" });
+        return;
+      }
+      
+      // Remove a carta da mão do jogador
+      const player = sala.gameState.players[playerIndex];
+      const cardIndex = player.hand.findIndex(c => c.id === card.id);
+      if (cardIndex === -1) {
+        if (callback) callback({ success: false, message: "Carta não encontrada na mão" });
+        return;
+      }
+      
+      player.hand.splice(cardIndex, 1);
+      player.cardCount = player.hand.length;
+      
+      // Adiciona carta ao descarte e atualiza topCard
+      sala.gameState.discardPile.push(card);
+      sala.gameState.topCard = card;
+      sala.gameState.declaredColor = declaredColor || null;
+      
+      // Processa efeitos da carta
+      processCardEffect(sala.gameState, card, io, roomId);
+      
+      // Avança para próximo jogador (só se não for carta Draw ou se não estiver esperando defesa)
+      if (!isDrawCard(card) || !sala.gameState.waitingForDefense) {
+        sala.gameState.currentPlayerIndex = 
+          (sala.gameState.currentPlayerIndex + sala.gameState.direction + sala.gameState.players.length) 
+          % sala.gameState.players.length;
+      }
+      
+      // Envia atualização para todos os jogadores
+      io.to(`sala_${roomId}`).emit("gameUpdate", {
+        topCard: sala.gameState.topCard,
+        declaredColor: sala.gameState.declaredColor,
+        players: sala.gameState.players.map((p, idx) => ({
+          id: p.id,
+          cardCount: p.cardCount,
+          name: sala.players[idx]?.name || 'Jogador'
+        })),
+        currentPlayerIndex: sala.gameState.currentPlayerIndex,
+        direction: sala.gameState.direction
       });
+      
+      if (callback) callback({ success: true, hand: player.hand });
+    });
 
-      socket.on('draw_card', ({ code, playerId, count }, cb) => {
-        console.log('[draw_card] received', { code, playerId, count, socketId: socket.id });
-        const room = games.get(code);
-        if (!room || !room.state) return cb && cb({ error: 'no game' });
-        const pending = room.state.pendingDraw || { type: null, amount: 0 };
-        if (pending.amount > 0 && (!count || count === 0)) {
-          // jogador está resolvendo uma penalidade: desenha o total pendente e perde a vez
-          const cards = drawCards(room.state, playerId, pending.amount);
-          console.log('[draw_card] applied penalty draw', { code, playerId, amount: pending.amount, cardsCount: cards.length });
-          room.state.pendingDraw = { type: null, amount: 0 };
-          // avançar a vez após aplicar penalidade
-          // ensure current points to the player who was penalized, then move to next
-          // find index of playerId
-          const idx = room.state.players.findIndex(p => p.id === playerId);
-          if (idx !== -1) room.state.current = idx;
-          // move to next
-          room.state.current = (room.state.current + room.state.direction + room.state.players.length) % room.state.players.length;
-          io.to(code).emit('state_update', room.state);
-          if (cb) cb({ cards });
-        } else {
-          // draw normal count (default 1)
-          const cards = drawCards(room.state, playerId, count || 1);
-          console.log('[draw_card] normal draw', { code, playerId, count: count || 1, cardsCount: cards.length });
-          // advance the turn only if the drawer was the current player
-          const idx = room.state.players.findIndex(p => p.id === playerId);
-          const priorCurrent = room.state.current;
-          if (idx !== -1 && priorCurrent === idx) {
-            room.state.current = (room.state.current + room.state.direction + room.state.players.length) % room.state.players.length;
-          }
-          io.to(code).emit('state_update', room.state);
-          if (cb) cb({ cards });
-        }
+    socket.on("drawCard", (roomId, callback) => {
+      const sala = rooms.find(room => room.id == roomId);
+      
+      if (!sala || !sala.gameState) {
+        if (callback) callback({ success: false, message: "Sala ou jogo não encontrado" });
+        return;
+      }
+      
+      const playerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
+      if (playerIndex === -1) {
+        if (callback) callback({ success: false, message: "Jogador não encontrado" });
+        return;
+      }
+      
+      // Verifica se é a vez do jogador
+      if (playerIndex !== sala.gameState.currentPlayerIndex) {
+        if (callback) callback({ success: false, message: "Não é sua vez" });
+        return;
+      }
+      
+      const card = drawCard(sala.gameState.deck);
+      if (!card) {
+        if (callback) callback({ success: false, message: "Baralho vazio" });
+        return;
+      }
+      
+      const player = sala.gameState.players[playerIndex];
+      player.hand.push(card);
+      player.cardCount = player.hand.length;
+      
+      // Envia atualização para todos os jogadores
+      io.to(`sala_${roomId}`).emit("gameUpdate", {
+        topCard: sala.gameState.topCard,
+        declaredColor: sala.gameState.declaredColor,
+        players: sala.gameState.players.map((p, idx) => ({
+          id: p.id,
+          cardCount: p.cardCount,
+          name: sala.players[idx]?.name || 'Jogador'
+        })),
+        currentPlayerIndex: sala.gameState.currentPlayerIndex,
+        direction: sala.gameState.direction
       });
+      
+      if (callback) callback({ success: true, card, hand: player.hand });
+    });
 
-      socket.on('get_state', ({ code }, cb) => {
-        const room = games.get(code);
-        if (!room) return cb && cb({ error: 'room not found' });
-        cb && cb({ state: room.state });
+    socket.on("defendDraw", (data, callback) => {
+      const { roomId, card, declaredColor } = data;
+      const sala = rooms.find(room => room.id == roomId);
+      
+      if (!sala || !sala.gameState) {
+        if (callback) callback({ success: false, message: "Sala ou jogo não encontrado" });
+        return;
+      }
+      
+      // Verifica se está esperando defesa deste jogador
+      if (!sala.gameState.waitingForDefense || sala.gameState.defensePlayerId !== socket.id) {
+        if (callback) callback({ success: false, message: "Não é momento de defender" });
+        return;
+      }
+      
+      const playerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
+      const player = sala.gameState.players[playerIndex];
+      
+      // Remove carta da mão
+      const cardIndex = player.hand.findIndex(c => c.id === card.id);
+      if (cardIndex === -1) {
+        if (callback) callback({ success: false, message: "Carta não encontrada" });
+        return;
+      }
+      
+      player.hand.splice(cardIndex, 1);
+      player.cardCount = player.hand.length;
+      
+      // Adiciona carta ao descarte
+      sala.gameState.discardPile.push(card);
+      sala.gameState.topCard = card;
+      sala.gameState.declaredColor = declaredColor || null;
+      
+      // Acumula mais penalidade
+      const drawAmount = calculateDrawPenalty(card);
+      sala.gameState.pendingDraws += drawAmount;
+      
+      // Reseta estado de defesa temporariamente
+      sala.gameState.waitingForDefense = false;
+      sala.gameState.defensePlayerId = null;
+      
+      // Avança para próximo jogador A PARTIR DE QUEM DEFENDEU
+      const nextPlayerIndex = 
+        (playerIndex + sala.gameState.direction + sala.gameState.players.length) 
+        % sala.gameState.players.length;
+      
+      // Atualiza currentPlayerIndex
+      sala.gameState.currentPlayerIndex = nextPlayerIndex;
+      
+      // Verifica se próximo jogador pode defender
+      const nextPlayer = sala.gameState.players[nextPlayerIndex];
+      const defensiveCards = getDefensiveDrawCards(nextPlayer.hand, card);
+      
+      if (defensiveCards.length > 0) {
+        console.log(`🛡️ Jogador ${nextPlayer.id} pode defender com ${defensiveCards.length} cartas`);
+        
+        sala.gameState.waitingForDefense = true;
+        sala.gameState.defensePlayerId = nextPlayer.id;
+        
+        io.to(nextPlayer.id).emit("drawDefenseOptions", {
+          defensiveCards,
+          pendingDraws: sala.gameState.pendingDraws,
+          attackCard: card
+        });
+      } else {
+        // Não pode defender, compra todas
+        console.log(`💥 Jogador ${nextPlayer.id} vai comprar ${sala.gameState.pendingDraws} cartas`);
+        applyDrawPenalty(sala.gameState, nextPlayerIndex);
+        
+        // Envia mão atualizada para o jogador que recebeu a penalidade
+        io.to(nextPlayer.id).emit("handUpdate", {
+          hand: nextPlayer.hand
+        });
+      }
+      
+      // Envia atualização
+      io.to(`sala_${roomId}`).emit("gameUpdate", {
+        topCard: sala.gameState.topCard,
+        declaredColor: sala.gameState.declaredColor,
+        players: sala.gameState.players.map((p, idx) => ({
+          id: p.id,
+          cardCount: p.cardCount,
+          name: sala.players[idx]?.name || 'Jogador'
+        })),
+        currentPlayerIndex: sala.gameState.currentPlayerIndex,
+        direction: sala.gameState.direction
       });
+      
+      if (callback) callback({ success: true, hand: player.hand });
+    });
 
-      socket.on('press_uno', ({ code, pressedBy }, cb) => {
-        const room = games.get(code);
-        if (!room) return cb && cb({ error: 'room not found' });
-        const alert = room.unoAlert;
-        if (!alert || alert.resolved) return cb && cb({ error: 'no uno alert' });
-        const ownerId = alert.ownerId;
-        // cancel server timeout
-        if (room.unoTimer) { clearTimeout(room.unoTimer); room.unoTimer = null; }
-        if (pressedBy === ownerId) {
-          // owner pressed their own uno (valid) -> resolve without penalty
-          alert.resolved = true;
-          io.to(code).emit('uno_resolved', { ownerId, by: pressedBy, penalty: false });
-          return cb && cb({ ok: true });
-        }
-        // another player pressed first -> owner compra 2
-        if (!room.state) {
-          // if game already ended, nothing to do
-          alert.resolved = true;
-          return cb && cb({ error: 'no game' });
-        }
-        const cards = drawCards(room.state, ownerId, 2);
-        alert.resolved = true;
-        io.to(code).emit('state_update', room.state);
-        io.to(code).emit('uno_resolved', { ownerId, by: pressedBy, penalty: true, cards });
-        return cb && cb({ ok: true });
+    socket.on("acceptDrawPenalty", (roomId, callback) => {
+      const sala = rooms.find(room => room.id == roomId);
+      
+      if (!sala || !sala.gameState) {
+        if (callback) callback({ success: false, message: "Sala ou jogo não encontrado" });
+        return;
+      }
+      
+      // Verifica se está esperando defesa deste jogador
+      if (!sala.gameState.waitingForDefense || sala.gameState.defensePlayerId !== socket.id) {
+        if (callback) callback({ success: false, message: "Não é momento de aceitar penalidade" });
+        return;
+      }
+      
+      const playerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
+      
+      // Aplica penalidade
+      applyDrawPenalty(sala.gameState, playerIndex);
+      
+      const player = sala.gameState.players[playerIndex];
+      
+      // Envia mão atualizada para o jogador que aceitou a penalidade
+      socket.emit("handUpdate", {
+        hand: player.hand
       });
+      
+      // Envia atualização
+      io.to(`sala_${roomId}`).emit("gameUpdate", {
+        topCard: sala.gameState.topCard,
+        declaredColor: sala.gameState.declaredColor,
+        players: sala.gameState.players.map((p, idx) => ({
+          id: p.id,
+          cardCount: p.cardCount,
+          name: sala.players[idx]?.name || 'Jogador'
+        })),
+        currentPlayerIndex: sala.gameState.currentPlayerIndex,
+        direction: sala.gameState.direction
+      });
+      
+      if (callback) callback({ success: true, hand: player.hand });
+    });
 
-      socket.on('disconnecting', () => {
-        // When a socket disconnects, remove its mapping from any room.players maps
-        // For lobby (no active game): remove the player from the list and notify lobby
-        // For active game: mark the player as disconnected in the game state (keep their hand)
-        for (const code of socket.rooms) {
-          if (code === socket.id) continue; // skip the socket's own room
-          const room = games.get(code);
-          if (!room || !room.players) continue;
-          const playerId = room.players.get(socket.id);
-          // remove socket->player mapping in both cases
-          if (playerId) room.players.delete(socket.id);
+    socket.on("requestGameState", (roomId) => {
+      console.log(`📨 Jogador ${socket.id} solicitou estado do jogo da sala ${roomId}`);
+      const sala = rooms.find(room => room.id == roomId);
+      
+      if (!sala || !sala.gameState) {
+        console.log(`❌ Sala ${roomId} não encontrada ou jogo não iniciado`);
+        return;
+      }
+      
+      console.log('🔍 Estrutura sala.players:', sala.players);
+      console.log('🔍 Estrutura sala.gameState.players:', sala.gameState.players.map(p => ({ id: p.id, cardCount: p.cardCount })));
+      
+      const playerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
+      if (playerIndex === -1) {
+        console.log(`❌ Jogador ${socket.id} não encontrado na sala`);
+        return;
+      }
+      
+      const playerHand = sala.gameState.players[playerIndex].hand;
+      console.log(`✅ Reenviando gameInitialized para ${socket.id}`);
+      
+      socket.emit("gameInitialized", {
+        hand: playerHand,
+        topCard: sala.gameState.topCard,
+        players: sala.gameState.players.map((p, idx) => ({
+          id: p.id,
+          cardCount: p.cardCount,
+          name: sala.players[idx]?.name || `Jogador ${idx + 1}`
+        })),
+        currentPlayerIndex: sala.gameState.currentPlayerIndex,
+        direction: sala.gameState.direction,
+        declaredColor: sala.gameState.declaredColor
+      });
+    });
 
-          if (!room.state) {
-            // lobby: the player fully leaves the waiting list
-            try {
-              // if the leaving socket was the room owner, try to reassign
-              if (room.owner === socket.id) {
-                const next = room.players && room.players.size ? Array.from(room.players.keys())[0] : null;
-                room.owner = next;
-              }
-              io.to(code).emit('player_joined', { players: Array.from(room.players.values()) });
-            } catch (e) {
-              // best-effort
+    socket.on("disconnect", () => {
+      console.log("Cliente desconectado:", socket.id);
+      clientSockets = clientSockets.filter(s => s.id !== socket.id);
+      
+      // Remove jogador de todas as salas
+      rooms.forEach(sala => {
+        if (sala.players) {
+          const playerIndex = sala.players.findIndex(p => p.id === socket.id);
+          if (playerIndex !== -1) {
+            sala.players.splice(playerIndex, 1);
+            // Cancela contagem se houver
+            if (sala.countdown) {
+              clearInterval(sala.countdown);
+              sala.countdown = null;
+              io.to(`sala_${sala.id}`).emit("countdownCancelled");
             }
-          } else {
-            // game in progress: mark player as disconnected but keep their hand/state
-            try {
-              const p = room.state.players && room.state.players.find(px => px.id === playerId);
-              if (p) p.connected = false;
-              io.to(code).emit('state_update', room.state);
-              io.to(code).emit('player_disconnected', { playerId });
-            } catch (e) {
-              // best-effort
-            }
+            // Atualiza sala
+            io.to(`sala_${sala.id}`).emit("roomUpdate", {
+              players: sala.players,
+              roomName: sala.nome
+            });
           }
         }
       });
     });
-  }
-  res.end();
+  });
+}
+
+function startCountdown(sala, idSala, io) {
+  let seconds = 5;
+  io.to(`sala_${idSala}`).emit("countdownUpdate", seconds);
+  
+  sala.countdown = setInterval(() => {
+    seconds--;
+    if (seconds > 0) {
+      io.to(`sala_${idSala}`).emit("countdownUpdate", seconds);
+    } else {
+      clearInterval(sala.countdown);
+      sala.countdown = null;
+      
+      console.log('========================================');
+      console.log('INICIANDO JOGO NA SALA:', sala.nome);
+      console.log('========================================');
+      
+      // Inicializa o jogo
+      const playerIds = sala.players.map(p => p.id);
+      console.log('IDs dos jogadores:', playerIds);
+      
+      sala.gameState = initializeGame(playerIds);
+      console.log('Game state criado:', {
+        jogadores: sala.gameState.players.length,
+        cartasNoBaralho: sala.gameState.deck.length,
+        topCard: sala.gameState.topCard,
+        currentPlayerIndex: sala.gameState.currentPlayerIndex
+      });
+      
+      // Envia estado inicial do jogo para todos os jogadores
+      sala.players.forEach((player, index) => {
+        const playerHand = sala.gameState.players[index].hand;
+        console.log(`Enviando gameInitialized para ${player.nome} (${player.id}):`, {
+          cartasNaMao: playerHand.length,
+          topCard: sala.gameState.topCard.color + ' ' + sala.gameState.topCard.value
+        });
+        
+        io.to(player.id).emit("gameInitialized", {
+          hand: playerHand,
+          topCard: sala.gameState.topCard,
+          players: sala.gameState.players.map((p, idx) => ({
+            id: p.id,
+            cardCount: p.cardCount,
+            name: sala.players[idx]?.name || 'Jogador'
+          })),
+          currentPlayerIndex: sala.gameState.currentPlayerIndex,
+          direction: sala.gameState.direction,
+          declaredColor: sala.gameState.declaredColor
+        });
+      });
+      
+      console.log('Emitindo gameStart para sala_' + idSala);
+      io.to(`sala_${idSala}`).emit("gameStart");
+      console.log(`✅ Jogo iniciado na sala ${sala.nome}`);
+      console.log('========================================');
+    }
+  }, 1000);
 }

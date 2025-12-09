@@ -71,8 +71,24 @@ const PlayerCard = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
-  border: 2px solid ${props => props.isActive ? '#10b981' : '#e0e7ff'};
+  border: 2px solid ${props => props.hasGuard ? '#10b981' : (props.isActive ? '#10b981' : '#e0e7ff')};
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+  position: relative;
+`;
+
+const UnoGuardBadge = styled.div`
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  font-size: 16px;
+  background: white;
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(16, 185, 129, 0.4);
 `;
 
 const PlayerName = styled.span`
@@ -132,6 +148,7 @@ const DiscardPile = styled.div`
   justify-content: center;
   overflow: hidden;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+  border: ${props => props.declaredColor ? `4px solid ${props.declaredColor}` : 'none'};
   
   img {
     width: 100%;
@@ -224,7 +241,9 @@ const Card = styled.div`
 `;
 
 const UnoButton = styled.button`
-  background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+  background: ${props => props.guardActive 
+    ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)' 
+    : 'linear-gradient(135deg, #f59e0b 0%, #ef4444 100%)'};
   color: white;
   border: none;
   padding: 16px 32px;
@@ -234,7 +253,30 @@ const UnoButton = styled.button`
   cursor: pointer;
   text-transform: uppercase;
   letter-spacing: 2px;
-  box-shadow: 0 8px 20px rgba(239, 68, 68, 0.4);
+  box-shadow: ${props => props.guardActive 
+    ? '0 8px 20px rgba(16, 185, 129, 0.4)' 
+    : '0 8px 20px rgba(239, 68, 68, 0.4)'};
+  position: relative;
+  
+  ${props => props.guardActive && `
+    &:after {
+      content: '✓';
+      position: absolute;
+      top: -8px;
+      right: -8px;
+      background: white;
+      color: #10b981;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 900;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    }
+  `}
   
   &:active {
     transform: scale(0.95);
@@ -252,6 +294,42 @@ const Direction = styled.div`
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
   border: 2px solid #e0e7ff;
   color: #667eea;
+`;
+
+const PenaltyPopup = styled.div`
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: white;
+  padding: 24px 48px;
+  border-radius: 16px;
+  font-size: 24px;
+  font-weight: 900;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(239, 68, 68, 0.6);
+  z-index: 10000;
+  animation: popupFade 2s ease forwards;
+  
+  @keyframes popupFade {
+    0% {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(0.8);
+    }
+    20% {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1.1);
+    }
+    80% {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
+    100% {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(0.9);
+    }
+  }
 `;
 
 const ColorModal = styled.div`
@@ -348,6 +426,17 @@ const ColorButton = styled.button`
   }
 `;
 
+// Função para converter código de cor para hex
+const getColorHex = (colorCode) => {
+  const colorMap = {
+    'R': '#ef4444', // Vermelho
+    'B': '#3b82f6', // Azul
+    'G': '#10b981', // Verde
+    'Y': '#f59e0b'  // Amarelo
+  };
+  return colorMap[colorCode] || null;
+};
+
 // Função para mapear carta para imagem
 const getCardImage = (card) => {
   if (!card) return null;
@@ -382,6 +471,10 @@ export default function Game() {
   const [showDefenseModal, setShowDefenseModal] = useState(false);
   const [defensiveCards, setDefensiveCards] = useState([]);
   const [pendingDraws, setPendingDraws] = useState(0);
+  const [showVictoryModal, setShowVictoryModal] = useState(false);
+  const [winnerName, setWinnerName] = useState('');
+  const [unoGuard, setUnoGuard] = useState(false);
+  const [showPenaltyPopup, setShowPenaltyPopup] = useState(false);
 
   useEffect(() => {
     if (!id || !name) {
@@ -392,6 +485,17 @@ export default function Game() {
     console.log('🎮 Inicializando página do jogo - Sala:', id, 'Jogador:', name);
     const socket = getSocket();
     console.log('📡 Socket obtido, ID:', socket?.id, 'Conectado:', socket?.connected);
+    
+    // DEBUG: Expõe função para simular vitória no console
+    window.simulateVictory = (winnerNameParam) => {
+      const victoryName = winnerNameParam || name || 'Jogador';
+      console.log('🎮 Simulando vitória de:', victoryName);
+      setWinnerName(victoryName);
+      setShowVictoryModal(true);
+      setTimeout(() => {
+        router.push(`/${id}?nome=${encodeURIComponent(name)}`);
+      }, 2000);
+    };
 
     socket.on('connect', () => {
       console.log('✅ Socket conectado! ID:', socket.id);
@@ -416,7 +520,8 @@ export default function Game() {
         id: p.id,
         name: p.name, // Usa o nome do servidor
         cards: p.cardCount,
-        isActive: index === data.currentPlayerIndex
+        isActive: index === data.currentPlayerIndex,
+        unoGuard: p.unoGuard || false
       }));
       console.log('👥 Lista de jogadores montada:', playersList);
       setPlayers(playersList);
@@ -444,7 +549,8 @@ export default function Game() {
           id: player.id,
           name: player.name, // Usa o nome do servidor
           cards: player.cardCount,
-          isActive: index === data.currentPlayerIndex
+          isActive: index === data.currentPlayerIndex,
+          unoGuard: player.unoGuard || false
         }));
         
         // Verifica se é minha vez
@@ -467,6 +573,26 @@ export default function Game() {
       setMyHand(data.hand);
     });
 
+    socket.on('unoPenalty', (data) => {
+      console.log('⚠️ Você foi penalizado por não gritar UNO!');
+      console.log('Acusado por:', data.accuserName);
+      
+      // Mostra popup de penalidade
+      setShowPenaltyPopup(true);
+      setTimeout(() => setShowPenaltyPopup(false), 2000);
+    });
+
+    socket.on('gameOver', (data) => {
+      console.log('🏆 Jogo finalizado! Vencedor:', data.winnerName);
+      setWinnerName(data.winnerName);
+      setShowVictoryModal(true);
+      
+      // Redireciona após 2 segundos
+      setTimeout(() => {
+        router.push(`/${id}?nome=${encodeURIComponent(name)}`);
+      }, 2000);
+    });
+
     console.log('🎧 Listeners registrados');
     
     // Solicita o estado atual do jogo ao servidor
@@ -480,6 +606,8 @@ export default function Game() {
       socket.off('gameUpdate');
       socket.off('drawDefenseOptions');
       socket.off('handUpdate');
+      socket.off('unoPenalty');
+      socket.off('gameOver');
     };
   }, [id, name]);
 
@@ -510,7 +638,8 @@ export default function Game() {
     }, (response) => {
       if (response.success) {
         console.log('Carta jogada com sucesso');
-        setMyHand(response.hand);
+        const newHand = response.hand;
+        setMyHand(newHand);
       } else {
         console.log('Erro ao jogar carta:', response.message);
         alert(response.message);
@@ -611,6 +740,12 @@ export default function Game() {
       if (response.success) {
         console.log('Carta comprada:', response.card);
         setMyHand(response.hand);
+        
+        // Remove UNO Guard ao comprar carta
+        if (unoGuard) {
+          setUnoGuard(false);
+          console.log('🚫 UNO Guard removido ao comprar carta');
+        }
       } else {
         console.log('Erro ao comprar carta:', response.message);
         alert(response.message);
@@ -619,8 +754,29 @@ export default function Game() {
   };
 
   const handleUno = () => {
-    console.log('UNO!');
-    // TODO: Implementar lógica de UNO
+    const socket = getSocket();
+    
+    // Verifica localmente se tem apenas 1 carta
+    if (myHand.length === 1) {
+      // Ativa UNO Guard
+      setUnoGuard(true);
+      console.log('✋ UNO Guard ativado!');
+      
+      // Notifica servidor
+      socket.emit('callUno', id, (response) => {
+        if (response.success && response.guardActivated) {
+          console.log('✅ UNO Guard confirmado pelo servidor');
+        }
+      });
+    } else {
+      // Mais de 1 carta ou 0 cartas - tenta acusar outros jogadores
+      console.log('🎮 Tentando acusar jogadores sem UNO Guard...');
+      socket.emit('callUno', id, (response) => {
+        if (response.success && response.penalizedPlayers > 0) {
+          console.log(`✅ ${response.penalizedPlayers} jogador(es) penalizado(s)!`);
+        }
+      });
+    }
   };
 
   if (!topCard) {
@@ -644,9 +800,10 @@ export default function Game() {
         <PlayersList>
           {players.map((player, index) => (
             <>
-              <PlayerCard key={player.id} isActive={player.isActive}>
+              <PlayerCard key={player.id} isActive={player.isActive} hasGuard={player.unoGuard}>
                 <PlayerName isActive={player.isActive}>{player.name}</PlayerName>
                 <CardCount isActive={player.isActive}>{player.cards}</CardCount>
+                {player.unoGuard && <UnoGuardBadge>🛡️</UnoGuardBadge>}
               </PlayerCard>
               {index < players.length - 1 && (
                 <Direction>
@@ -662,7 +819,7 @@ export default function Game() {
             <DeckPile onClick={handleDrawCard}>
               🂠
             </DeckPile>
-            <DiscardPile>
+            <DiscardPile declaredColor={declaredColor ? getColorHex(declaredColor) : null}>
               <img src={getCardImage(topCard)} alt="Top card" />
             </DiscardPile>
           </Deck>
@@ -680,7 +837,9 @@ export default function Game() {
             </Card>
           ))}
         </HandCards>
-        <UnoButton onClick={handleUno}>UNO!</UnoButton>
+        <UnoButton guardActive={unoGuard} onClick={handleUno}>
+          {unoGuard ? '✓ UNO GUARD' : 'UNO!'}
+        </UnoButton>
       </HandArea>
       
       <ToggleHandButton 
@@ -753,6 +912,23 @@ export default function Game() {
             </ColorButton>
           </ColorModalContent>
         </ColorModal>
+      )}
+
+      {showVictoryModal && (
+        <ColorModal>
+          <ColorModalContent onClick={(e) => e.stopPropagation()}>
+            <ColorModalTitle style={{ fontSize: '32px', marginBottom: '0' }}>
+              🏆 Vitória de {winnerName}!
+            </ColorModalTitle>
+          </ColorModalContent>
+        </ColorModal>
+      )}
+
+      {showPenaltyPopup && (
+        <PenaltyPopup>
+          ⚠️ PENALIDADE!<br/>
+          +2 cartas por não gritar UNO!
+        </PenaltyPopup>
       )}
     </Container>
   );

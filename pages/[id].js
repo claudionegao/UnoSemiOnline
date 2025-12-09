@@ -147,6 +147,15 @@ export default function Room() {
         console.log('Entrou na sala:', salaId);
       });
     });
+    
+    // Se já estiver conectado, entra na sala imediatamente
+    if (socket.connected) {
+      console.log('Socket já conectado, entrando na sala:', socket.id);
+      setMyId(socket.id);
+      socket.emit('entrarSala', id, nome, (salaId) => {
+        console.log('Entrou na sala:', salaId);
+      });
+    }
 
     socket.on('roomUpdate', (data) => {
       console.log('Atualização da sala:', data);

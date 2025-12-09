@@ -124,8 +124,13 @@ export default function Home() {
             const nomeSala = `sala do ${nome}`;
             socket.emit('criarSala', nomeSala, (id) => {
               if (id) {
-                // Após criar a sala, navega passando o nome via query
-                router.push(`/${id}?nome=${encodeURIComponent(nome)}`);
+                // Após criar a sala, ENTRA na sala com o criador
+                socket.emit('entrarSala', id, nome, (entrarId) => {
+                  if (entrarId) {
+                    // Navega para a sala após entrar
+                    router.push(`/${id}?nome=${encodeURIComponent(nome)}`);
+                  }
+                });
               }
             });
           } else {

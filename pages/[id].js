@@ -139,6 +139,14 @@ export default function Room() {
 
     const socket = getSocket();
     
+    // Remove listeners antigos primeiro (evita duplicatas)
+    socket.off('connect');
+    socket.off('roomUpdate');
+    socket.off('countdownUpdate');
+    socket.off('countdownCancelled');
+    socket.off('gameStart');
+    socket.off('erro');
+    
     socket.on('connect', () => {
       console.log('Conectado à sala:', socket.id);
       setMyId(socket.id);
@@ -162,6 +170,11 @@ export default function Room() {
       setPlayers(data.players || []);
       setRoomName(data.roomName || '');
     });
+    
+    socket.on('erro', (message) => {
+      console.error('Erro:', message);
+      alert(message);
+    });
 
     socket.on('countdownUpdate', (seconds) => {
       setCountdown(seconds);
@@ -184,6 +197,7 @@ export default function Room() {
       socket.off('countdownUpdate');
       socket.off('countdownCancelled');
       socket.off('gameStart');
+      socket.off('erro');
     };
   }, [id, nome]);
 
@@ -199,6 +213,15 @@ export default function Room() {
     if (socket) {
       socket.emit('cancelCountdown', id);
     }
+  };
+
+  const sairSala = () => {
+    const socket = getSocket();
+    if (socket) {
+      // Notifica o servidor que está saindo
+      socket.emit('sairSala', id);
+    }
+    router.push('/');
   };
 
   const myPlayer = players.find(p => p.id === myId);
@@ -248,7 +271,7 @@ export default function Room() {
         <Button 
           variant="cancel"
           style={{ marginTop: '16px', background: '#94a3b8' }}
-          onClick={() => router.push('/')}
+          onClick={sairSala}
         >
           Sair da Sala
         </Button>

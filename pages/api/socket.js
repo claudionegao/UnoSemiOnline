@@ -84,12 +84,15 @@ function applyDrawPenalty(gameState, playerIndex, io, roomId, sala) {
     io.to(`sala_${roomId}`).emit("gameUpdate", {
       topCard: gameState.topCard,
       declaredColor: gameState.declaredColor,
-      players: gameState.players.map((p, idx) => ({
-        id: p.id,
-        cardCount: p.cardCount,
-        name: sala.players[idx]?.name || 'Jogador',
-        unoGuard: p.unoGuard || false
-      })),
+      players: gameState.players.map((p) => {
+        const playerInfo = sala.players.find(sp => sp.id === p.id);
+        return {
+          id: p.id,
+          cardCount: p.cardCount,
+          name: playerInfo?.name || 'Jogador',
+          unoGuard: p.unoGuard || false
+        };
+      }),
       currentPlayerIndex: gameState.currentPlayerIndex,
       direction: gameState.direction
     });
@@ -134,7 +137,8 @@ export default function handler(req, res) {
           id: rooms.length + 1, 
           clients: [], 
           players: [], 
-          countdown: null
+          countdown: null,
+          gameState: null  // Fix: inicializa gameState como null
         };
         rooms.push(novaSala);
         console.log(`Sala criada: ${nomeSala} por ${socket.id}`);
@@ -177,16 +181,62 @@ export default function handler(req, res) {
         if (!sala.players) sala.players = [];
         const existingPlayerIndex = sala.players.findIndex(p => p.id === socket.id);
         
+        // Verifica duplicata de nome (ignora jogadores desconectados aguardando timeout)
+        const duplicateNameIndex = sala.players.findIndex(
+          p => p.name === nome && p.id !== socket.id && !p.disconnected
+        );
+        
         if (existingPlayerIndex === -1) {
-          // Jogador novo, adiciona
-          const player = { id: socket.id, name: nome, ready: false };
-          sala.players.push(player);
-          console.log(`Cliente ${socket.id} (${nome}) entrou na sala ${sala.nome}`);
+          // Verifica se existe jogador desconectado com mesmo nome (reconexão com novo ID)
+          const disconnectedPlayerIndex = sala.players.findIndex(
+            p => p.name === nome && p.disconnected
+          );
+          
+          if (disconnectedPlayerIndex !== -1) {
+            // Reconexão com novo socket ID - atualiza o jogador existente
+            const player = sala.players[disconnectedPlayerIndex];
+            const oldSocketId = player.id;
+            
+            if (player.disconnectTimeout) {
+              clearTimeout(player.disconnectTimeout);
+              player.disconnectTimeout = null;
+            }
+            
+            // IMPORTANTE: Remove o socket ANTIGO da sala antes de atualizar o ID
+            io.sockets.sockets.get(oldSocketId)?.leave(`sala_${idSala}`);
+            
+            player.id = socket.id;  // Atualiza para o novo socket ID
+            player.disconnected = false;
+            player.disconnectTime = null;
+            player.ready = false;
+            console.log(`🔄 ${nome} reconectou com novo ID! (${oldSocketId} → ${socket.id})`);
+          } else if (duplicateNameIndex !== -1) {
+            // Nome duplicado com jogador ativo
+            console.log(`⚠️ Nome duplicado detectado: ${nome}`);
+            socket.emit("erro", "Nome já está em uso nesta sala!");
+            if (callback) callback(null);
+            return;
+          } else {
+            // Jogador novo
+            const player = { id: socket.id, name: nome, ready: false, disconnected: false };
+            sala.players.push(player);
+            console.log(`✅ Cliente ${socket.id} (${nome}) entrou na sala ${sala.nome}`);
+          }
         } else {
-          // Jogador já existe, apenas atualiza o nome e reseta ready
-          sala.players[existingPlayerIndex].name = nome;
-          sala.players[existingPlayerIndex].ready = false;
-          console.log(`Cliente ${socket.id} (${nome}) reconectou na sala ${sala.nome}`);
+          // Reconexão com mesmo ID - limpa timeout e marca como conectado
+          const player = sala.players[existingPlayerIndex];
+          
+          if (player.disconnectTimeout) {
+            clearTimeout(player.disconnectTimeout);
+            player.disconnectTimeout = null;
+            console.log(`🔄 ${nome} reconectou! Timeout cancelado.`);
+          }
+          
+          player.disconnected = false;
+          player.disconnectTime = null;
+          player.name = nome;
+          player.ready = false;
+          console.log(`✅ Cliente ${socket.id} (${nome}) reconectou na sala ${sala.nome}`);
         }
         
         socket.join(`sala_${idSala}`);
@@ -255,6 +305,81 @@ export default function handler(req, res) {
           players: sala.players,
           roomName: sala.nome
         });
+      }
+    });
+
+    socket.on("sairSala", (idSala) => {
+      console.log(`Jogador ${socket.id} saindo da sala ${idSala}`);
+      const sala = rooms.find(room => room.id == idSala);
+      
+      if (sala) {
+        // Remove o jogador da sala IMEDIATAMENTE (sair intencional, não desconexão)
+        const playerIndex = sala.players.findIndex(p => p.id === socket.id);
+        if (playerIndex !== -1) {
+          const player = sala.players[playerIndex];
+          const playerName = player.name;
+          
+          // Cancela timeout se houver (em caso de reconexão durante grace period)
+          if (player.disconnectTimeout) {
+            clearTimeout(player.disconnectTimeout);
+            player.disconnectTimeout = null;
+          }
+          
+          sala.players.splice(playerIndex, 1);
+          console.log(`✅ ${playerName} saiu da sala ${sala.nome}`);
+        }
+        
+        // Se o jogo estava em andamento, remove do gameState também
+        if (sala.gameState) {
+          const gamePlayerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
+          if (gamePlayerIndex !== -1) {
+            sala.gameState.players.splice(gamePlayerIndex, 1);
+            
+            // Ajusta currentPlayerIndex se necessário
+            if (sala.gameState.players.length > 0) {
+              if (sala.gameState.currentPlayerIndex >= sala.gameState.players.length) {
+                sala.gameState.currentPlayerIndex = 0;
+              }
+            } else {
+              // Sem jogadores, encerra jogo
+              sala.gameState = null;
+            }
+          }
+        }
+        
+        // Cancela countdown se houver
+        if (sala.countdown) {
+          clearInterval(sala.countdown);
+          sala.countdown = null;
+          io.to(`sala_${idSala}`).emit("countdownCancelled");
+        }
+        
+        // Remove da sala Socket.IO
+        socket.leave(`sala_${idSala}`);
+        
+        // Notifica outros jogadores
+        io.to(`sala_${idSala}`).emit("roomUpdate", {
+          players: sala.players,
+          roomName: sala.nome
+        });
+        
+        // Remove sala se ficou vazia
+        if (sala.players.length === 0) {
+          const roomIndex = rooms.findIndex(r => r.id === sala.id);
+          if (roomIndex !== -1) {
+            rooms.splice(roomIndex, 1);
+            console.log(`🗑️ Sala ${sala.nome} removida (vazia)`);
+          }
+        }
+        
+        // Atualiza lista de salas no lobby
+        const roomsInfo = rooms.map(r => ({
+          id: r.id,
+          nome: r.nome,
+          playerCount: r.players?.length || 0,
+          isPlaying: r.gameState !== null
+        }));
+        io.emit("updateRooms", { rooms: roomsInfo });
       }
     });
 
@@ -344,12 +469,15 @@ export default function handler(req, res) {
       io.to(`sala_${roomId}`).emit("gameUpdate", {
         topCard: sala.gameState.topCard,
         declaredColor: sala.gameState.declaredColor,
-        players: sala.gameState.players.map((p, idx) => ({
-          id: p.id,
-          cardCount: p.cardCount,
-          name: sala.players[idx]?.name || 'Jogador',
-          unoGuard: p.unoGuard || false
-        })),
+        players: sala.gameState.players.map((p) => {
+          const playerInfo = sala.players.find(sp => sp.id === p.id);
+          return {
+            id: p.id,
+            cardCount: p.cardCount,
+            name: playerInfo?.name || 'Jogador',
+            unoGuard: p.unoGuard || false
+          };
+        }),
         currentPlayerIndex: sala.gameState.currentPlayerIndex,
         direction: sala.gameState.direction
       });
@@ -402,12 +530,15 @@ export default function handler(req, res) {
       io.to(`sala_${roomId}`).emit("gameUpdate", {
         topCard: sala.gameState.topCard,
         declaredColor: sala.gameState.declaredColor,
-        players: sala.gameState.players.map((p, idx) => ({
-          id: p.id,
-          cardCount: p.cardCount,
-          name: sala.players[idx]?.name || 'Jogador',
-          unoGuard: p.unoGuard || false
-        })),
+        players: sala.gameState.players.map((p) => {
+          const playerInfo = sala.players.find(sp => sp.id === p.id);
+          return {
+            id: p.id,
+            cardCount: p.cardCount,
+            name: playerInfo?.name || 'Jogador',
+            unoGuard: p.unoGuard || false
+          };
+        }),
         currentPlayerIndex: sala.gameState.currentPlayerIndex,
         direction: sala.gameState.direction
       });
@@ -424,11 +555,20 @@ export default function handler(req, res) {
         return;
       }
       
+      // Verifica se já está processando defesa (proteção contra race condition)
+      if (sala.gameState.processingDefense) {
+        if (callback) callback({ success: false, message: "Aguarde o processamento anterior" });
+        return;
+      }
+      
       // Verifica se está esperando defesa deste jogador
       if (!sala.gameState.waitingForDefense || sala.gameState.defensePlayerId !== socket.id) {
         if (callback) callback({ success: false, message: "Não é momento de defender" });
         return;
       }
+      
+      // Trava processamento
+      sala.gameState.processingDefense = true;
       
       const playerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
       const player = sala.gameState.players[playerIndex];
@@ -466,6 +606,9 @@ export default function handler(req, res) {
           isPlaying: r.gameState !== null
         }));
         io.emit("updateRooms", { rooms: roomsInfo });
+        
+        // Destrava processamento
+        sala.gameState.processingDefense = false;
         
         if (callback) callback({ success: true, hand: player.hand, winner: true });
         return;
@@ -522,23 +665,35 @@ export default function handler(req, res) {
       io.to(`sala_${roomId}`).emit("gameUpdate", {
         topCard: sala.gameState.topCard,
         declaredColor: sala.gameState.declaredColor,
-        players: sala.gameState.players.map((p, idx) => ({
-          id: p.id,
-          cardCount: p.cardCount,
-          name: sala.players[idx]?.name || 'Jogador'
-        })),
+        players: sala.gameState.players.map((p) => {
+          const playerInfo = sala.players.find(sp => sp.id === p.id);
+          return {
+            id: p.id,
+            cardCount: p.cardCount,
+            name: playerInfo?.name || 'Jogador'
+          };
+        }),
         currentPlayerIndex: sala.gameState.currentPlayerIndex,
         direction: sala.gameState.direction
       });
       
+      // Destrava processamento
+      sala.gameState.processingDefense = false;
+      
       if (callback) callback({ success: true, hand: player.hand });
     });
 
-    socket.on("acceptDrawPenalty", (roomId, callback) => {
+    socket.on("callUno", (roomId, callback) => {
       const sala = rooms.find(room => room.id == roomId);
       
       if (!sala || !sala.gameState) {
         if (callback) callback({ success: false, message: "Sala ou jogo não encontrado" });
+        return;
+      }
+      
+      // Verifica se já está processando defesa (proteção contra race condition)
+      if (sala.gameState.processingDefense) {
+        if (callback) callback({ success: false, message: "Aguarde o processamento anterior" });
         return;
       }
       
@@ -547,6 +702,9 @@ export default function handler(req, res) {
         if (callback) callback({ success: false, message: "Não é momento de aceitar penalidade" });
         return;
       }
+      
+      // Trava processamento
+      sala.gameState.processingDefense = true;
       
       const playerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
       
@@ -564,14 +722,20 @@ export default function handler(req, res) {
       io.to(`sala_${roomId}`).emit("gameUpdate", {
         topCard: sala.gameState.topCard,
         declaredColor: sala.gameState.declaredColor,
-        players: sala.gameState.players.map((p, idx) => ({
-          id: p.id,
-          cardCount: p.cardCount,
-          name: sala.players[idx]?.name || 'Jogador'
-        })),
+        players: sala.gameState.players.map((p) => {
+          const playerInfo = sala.players.find(sp => sp.id === p.id);
+          return {
+            id: p.id,
+            cardCount: p.cardCount,
+            name: playerInfo?.name || 'Jogador'
+          };
+        }),
         currentPlayerIndex: sala.gameState.currentPlayerIndex,
         direction: sala.gameState.direction
       });
+      
+      // Destrava processamento
+      sala.gameState.processingDefense = false;
       
       if (callback) callback({ success: true, hand: player.hand });
     });
@@ -601,12 +765,15 @@ export default function handler(req, res) {
         io.to(`sala_${roomId}`).emit("gameUpdate", {
           topCard: sala.gameState.topCard,
           declaredColor: sala.gameState.declaredColor,
-          players: sala.gameState.players.map((p, idx) => ({
-            id: p.id,
-            cardCount: p.cardCount,
-            name: sala.players[idx]?.name || 'Jogador',
-            unoGuard: p.unoGuard || false
-          })),
+          players: sala.gameState.players.map((p) => {
+            const playerInfo = sala.players.find(sp => sp.id === p.id);
+            return {
+              id: p.id,
+              cardCount: p.cardCount,
+              name: playerInfo?.name || 'Jogador',
+              unoGuard: p.unoGuard || false
+            };
+          }),
           currentPlayerIndex: sala.gameState.currentPlayerIndex,
           direction: sala.gameState.direction
         });
@@ -651,12 +818,15 @@ export default function handler(req, res) {
         io.to(`sala_${roomId}`).emit("gameUpdate", {
           topCard: sala.gameState.topCard,
           declaredColor: sala.gameState.declaredColor,
-          players: sala.gameState.players.map((p, idx) => ({
-            id: p.id,
-            cardCount: p.cardCount,
-            name: sala.players[idx]?.name || 'Jogador',
-            unoGuard: p.unoGuard || false
-          })),
+          players: sala.gameState.players.map((p) => {
+            const playerInfo = sala.players.find(sp => sp.id === p.id);
+            return {
+              id: p.id,
+              cardCount: p.cardCount,
+              name: playerInfo?.name || 'Jogador',
+              unoGuard: p.unoGuard || false
+            };
+          }),
           currentPlayerIndex: sala.gameState.currentPlayerIndex,
           direction: sala.gameState.direction
         });
@@ -692,12 +862,15 @@ export default function handler(req, res) {
       socket.emit("gameInitialized", {
         hand: playerHand,
         topCard: sala.gameState.topCard,
-        players: sala.gameState.players.map((p, idx) => ({
-          id: p.id,
-          cardCount: p.cardCount,
-          name: sala.players[idx]?.name || `Jogador ${idx + 1}`,
-          unoGuard: p.unoGuard || false
-        })),
+        players: sala.gameState.players.map((p, idx) => {
+          const playerInfo = sala.players.find(sp => sp.id === p.id);
+          return {
+            id: p.id,
+            cardCount: p.cardCount,
+            name: playerInfo?.name || `Jogador ${idx + 1}`,
+            unoGuard: p.unoGuard || false
+          };
+        }),
         currentPlayerIndex: sala.gameState.currentPlayerIndex,
         direction: sala.gameState.direction,
         declaredColor: sala.gameState.declaredColor
@@ -708,35 +881,107 @@ export default function handler(req, res) {
       console.log("Cliente desconectado:", socket.id);
       clientSockets = clientSockets.filter(s => s.id !== socket.id);
       
-      // Remove jogador de todas as salas
+      // Marca jogador como desconectado com grace period de 30 segundos
       rooms.forEach(sala => {
         if (sala.players) {
           const playerIndex = sala.players.findIndex(p => p.id === socket.id);
           if (playerIndex !== -1) {
-            sala.players.splice(playerIndex, 1);
+            const player = sala.players[playerIndex];
+            
+            // Marca como desconectado (não remove ainda)
+            player.disconnected = true;
+            player.disconnectTime = Date.now();
+            
+            console.log(`⏳ ${player.name} desconectou. Grace period: 30s`);
+            
             // Cancela contagem se houver
             if (sala.countdown) {
               clearInterval(sala.countdown);
               sala.countdown = null;
               io.to(`sala_${sala.id}`).emit("countdownCancelled");
             }
-            // Atualiza sala
+            
+            // Notifica outros jogadores
             io.to(`sala_${sala.id}`).emit("roomUpdate", {
               players: sala.players,
               roomName: sala.nome
             });
+            
+            // Timeout de 30 segundos antes de remover definitivamente
+            player.disconnectTimeout = setTimeout(() => {
+              // Verifica se ainda está desconectado
+              if (player.disconnected) {
+                console.log(`⏰ Removendo ${player.name} por timeout (30s)`);
+                
+                // Remove de sala.players
+                const currentIndex = sala.players.findIndex(p => p.id === socket.id);
+                if (currentIndex !== -1) {
+                  sala.players.splice(currentIndex, 1);
+                }
+                
+                // Remove de gameState.players se estava em jogo
+                if (sala.gameState) {
+                  const gamePlayerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
+                  if (gamePlayerIndex !== -1) {
+                    sala.gameState.players.splice(gamePlayerIndex, 1);
+                    
+                    // Ajusta currentPlayerIndex se necessário
+                    if (sala.gameState.players.length > 0) {
+                      if (sala.gameState.currentPlayerIndex >= sala.gameState.players.length) {
+                        sala.gameState.currentPlayerIndex = 0;
+                      }
+                    } else {
+                      // Sem jogadores, encerra jogo
+                      sala.gameState = null;
+                    }
+                    
+                    // Envia atualização do jogo
+                    io.to(`sala_${sala.id}`).emit("gameUpdate", {
+                      topCard: sala.gameState?.topCard,
+                      declaredColor: sala.gameState?.declaredColor,
+                      players: sala.gameState?.players.map((p) => {
+                        const playerInfo = sala.players.find(sp => sp.id === p.id);
+                        return {
+                          id: p.id,
+                          cardCount: p.cardCount,
+                          name: playerInfo?.name || 'Jogador',
+                          unoGuard: p.unoGuard || false
+                        };
+                      }) || [],
+                      currentPlayerIndex: sala.gameState?.currentPlayerIndex || 0,
+                      direction: sala.gameState?.direction || 1
+                    });
+                  }
+                }
+                
+                // Atualiza sala
+                io.to(`sala_${sala.id}`).emit("roomUpdate", {
+                  players: sala.players,
+                  roomName: sala.nome
+                });
+                
+                // Remove sala se ficou vazia (memory leak fix)
+                if (sala.players.length === 0) {
+                  const roomIndex = rooms.findIndex(r => r.id === sala.id);
+                  if (roomIndex !== -1) {
+                    rooms.splice(roomIndex, 1);
+                    console.log(`🗑️ Sala ${sala.nome} removida (vazia)`);
+                  }
+                }
+                
+                // Atualiza lista de salas no lobby
+                const roomsInfo = rooms.map(r => ({
+                  id: r.id,
+                  nome: r.nome,
+                  playerCount: r.players?.length || 0,
+                  isPlaying: r.gameState !== null
+                }));
+                io.emit("updateRooms", { rooms: roomsInfo });
+              }
+            }, 30000); // 30 segundos
           }
         }
       });
-      
-      // Atualiza lista de salas no lobby
-      const roomsInfo = rooms.map(r => ({
-        id: r.id,
-        nome: r.nome,
-        playerCount: r.players?.length || 0,
-        isPlaying: r.gameState !== null
-      }));
-      io.emit("updateRooms", { rooms: roomsInfo });
     });
   });
 }
@@ -752,6 +997,14 @@ function startCountdown(sala, idSala, io) {
     } else {
       clearInterval(sala.countdown);
       sala.countdown = null;
+      
+      // Validação final: mínimo 2 jogadores (podem ter desconectado durante countdown)
+      if (sala.players.length < 2) {
+        console.log(`⚠️ Jogo cancelado: menos de 2 jogadores na sala ${sala.nome}`);
+        io.to(`sala_${idSala}`).emit("countdownCancelled");
+        io.to(`sala_${idSala}`).emit("erro", "Jogo cancelado: mínimo 2 jogadores necessários");
+        return;
+      }
       
       console.log('========================================');
       console.log('INICIANDO JOGO NA SALA:', sala.nome);
@@ -780,12 +1033,15 @@ function startCountdown(sala, idSala, io) {
         io.to(player.id).emit("gameInitialized", {
           hand: playerHand,
           topCard: sala.gameState.topCard,
-          players: sala.gameState.players.map((p, idx) => ({
-            id: p.id,
-            cardCount: p.cardCount,
-            name: sala.players[idx]?.name || 'Jogador',
-            unoGuard: p.unoGuard || false
-          })),
+          players: sala.gameState.players.map((p) => {
+            const playerInfo = sala.players.find(sp => sp.id === p.id);
+            return {
+              id: p.id,
+              cardCount: p.cardCount,
+              name: playerInfo?.name || 'Jogador',
+              unoGuard: p.unoGuard || false
+            };
+          }),
           currentPlayerIndex: sala.gameState.currentPlayerIndex,
           direction: sala.gameState.direction,
           declaredColor: sala.gameState.declaredColor

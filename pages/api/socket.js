@@ -120,7 +120,13 @@ export default function handler(req, res) {
     clientSockets.push(socket);
     
     // Envia as salas existentes para o cliente que acabou de conectar
-    socket.emit("updateRooms", { rooms: rooms });
+    const roomsInfo = rooms.map(r => ({
+      id: r.id,
+      nome: r.nome,
+      playerCount: r.players?.length || 0,
+      isPlaying: r.gameState !== null
+    }));
+    socket.emit("updateRooms", { rooms: roomsInfo });
     console.log("updateRooms enviado para cliente:", socket.id);
 
     // adiciona um listener para criar salas
@@ -137,7 +143,13 @@ export default function handler(req, res) {
         rooms.push(novaSala);
         console.log(`Sala criada: ${nomeSala} por ${socket.id}`);
         // Envia a lista atualizada de salas para TODOS os clientes
-        io.emit("updateRooms", { rooms: rooms });
+        const roomsInfo = rooms.map(r => ({
+          id: r.id,
+          nome: r.nome,
+          playerCount: r.players?.length || 0,
+          isPlaying: r.gameState !== null
+        }));
+        io.emit("updateRooms", { rooms: roomsInfo });
         // Chama o callback passando o ID da sala criada
         if (callback) callback(novaSala.id);
       } else {
@@ -149,6 +161,22 @@ export default function handler(req, res) {
       console.log(`Tentando entrar na sala ${idSala} com nome ${nome}`);
       const sala = rooms.find(room => room.id == idSala); // Usando == para comparar string com number
       if (sala) {
+        // Verifica se o jogo está acontecendo
+        if (sala.gameState !== null) {
+          console.log(`Sala ${idSala} está em jogo, entrada bloqueada`);
+          socket.emit("erro", "Não é possível entrar, o jogo já começou");
+          if (callback) callback(null);
+          return;
+        }
+        
+        // Verifica limite de jogadores
+        if (sala.players && sala.players.length >= 10) {
+          console.log(`Sala ${idSala} está cheia (10 jogadores)`);
+          socket.emit("erro", "Sala cheia! Máximo de 10 jogadores");
+          if (callback) callback(null);
+          return;
+        }
+        
         // Verifica se o jogador já está na sala (reconexão ou retorno do jogo)
         if (!sala.players) sala.players = [];
         const existingPlayerIndex = sala.players.findIndex(p => p.id === socket.id);
@@ -172,6 +200,15 @@ export default function handler(req, res) {
           players: sala.players,
           roomName: sala.nome
         });
+        
+        // Atualiza lista de salas no lobby
+        const roomsInfo = rooms.map(r => ({
+          id: r.id,
+          nome: r.nome,
+          playerCount: r.players?.length || 0,
+          isPlaying: r.gameState !== null
+        }));
+        io.emit("updateRooms", { rooms: roomsInfo });
         
         // Chama o callback confirmando a entrada
         console.log(`Chamando callback com id: ${sala.id}`);
@@ -294,6 +331,15 @@ export default function handler(req, res) {
         sala.gameState = null;
         sala.players.forEach(p => p.ready = false);
         
+        // Atualiza lista de salas no lobby (jogo terminou)
+        const roomsInfo = rooms.map(r => ({
+          id: r.id,
+          nome: r.nome,
+          playerCount: r.players?.length || 0,
+          isPlaying: r.gameState !== null
+        }));
+        io.emit("updateRooms", { rooms: roomsInfo });
+        
         if (callback) callback({ success: true, hand: player.hand, winner: true });
         return;
       }
@@ -415,6 +461,15 @@ export default function handler(req, res) {
         // Reseta o estado do jogo e marca todos como não prontos
         sala.gameState = null;
         sala.players.forEach(p => p.ready = false);
+        
+        // Atualiza lista de salas no lobby (jogo terminou)
+        const roomsInfo = rooms.map(r => ({
+          id: r.id,
+          nome: r.nome,
+          playerCount: r.players?.length || 0,
+          isPlaying: r.gameState !== null
+        }));
+        io.emit("updateRooms", { rooms: roomsInfo });
         
         if (callback) callback({ success: true, hand: player.hand, winner: true });
         return;
@@ -677,6 +732,15 @@ export default function handler(req, res) {
           }
         }
       });
+      
+      // Atualiza lista de salas no lobby
+      const roomsInfo = rooms.map(r => ({
+        id: r.id,
+        nome: r.nome,
+        playerCount: r.players?.length || 0,
+        isPlaying: r.gameState !== null
+      }));
+      io.emit("updateRooms", { rooms: roomsInfo });
     });
   });
 }
@@ -736,6 +800,15 @@ function startCountdown(sala, idSala, io) {
       io.to(`sala_${idSala}`).emit("gameStart");
       console.log(`✅ Jogo iniciado na sala ${sala.nome}`);
       console.log('========================================');
+      
+      // Atualiza lista de salas no lobby (jogo começou)
+      const roomsInfo = rooms.map(r => ({
+        id: r.id,
+        nome: r.nome,
+        playerCount: r.players?.length || 0,
+        isPlaying: r.gameState !== null
+      }));
+      io.emit("updateRooms", { rooms: roomsInfo });
     }
   }, 1000);
 }

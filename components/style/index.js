@@ -104,33 +104,46 @@ export const RoomList = styled.div`
 `;
 
 export const RoomItem = styled.div`
-	background: #f8faff;
+	background: ${props => props.isPlaying ? '#ffe0e0' : '#f8faff'};
 	border-radius: 10px;
 	padding: 14px 18px;
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
 	box-shadow: 0 2px 8px rgba(102, 126, 234, 0.08);
+	opacity: ${props => props.isPlaying ? 0.6 : 1};
+`;
+
+export const RoomInfo = styled.div`
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
 `;
 
 export const RoomName = styled.span`
-	color: #667eea;
+	color: ${props => props.isPlaying ? '#c44569' : '#667eea'};
 	font-size: 16px;
 	font-weight: 700;
+`;
+
+export const RoomStatus = styled.span`
+	color: ${props => props.isPlaying ? '#c44569' : '#764ba2'};
+	font-size: 12px;
+	font-weight: 600;
 `;
 
 export const RoomButton = styled.button`
 	padding: 8px 16px;
 	font-size: 14px;
 	font-weight: 700;
-	background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-	color: #fff;
+	background: ${props => props.disabled ? '#ccc' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'};
+	color: ${props => props.disabled ? '#666' : '#fff'};
 	border: none;
 	border-radius: 8px;
-	cursor: pointer;
+	cursor: ${props => props.disabled ? 'not-allowed' : 'pointer'};
 	transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 
-	&:active {
+	&:active:not(:disabled) {
 		transform: scale(0.97);
 		box-shadow: 0 2px 8px rgba(102, 126, 234, 0.18);
 	}

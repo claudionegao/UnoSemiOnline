@@ -13,7 +13,9 @@ import {
   Subtitle,
   RoomList,
   RoomItem,
+  RoomInfo,
   RoomName,
+  RoomStatus,
   RoomButton
 } from '../components/style/index';
 import ModalName from '../components/ModalName';
@@ -24,6 +26,7 @@ export default function Home() {
   const [salas, setSalas] = useState([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalAction, setModalAction] = useState(null); // 'criar' ou id da sala
+  const [errorMessage, setErrorMessage] = useState('');
   const router = useRouter();
 
   useEffect(() => {
@@ -39,6 +42,11 @@ export default function Home() {
       console.log('Salas recebidas:', data.rooms);
       setSalas(data.rooms);
     });
+    socket.on('erro', (message) => {
+      console.error('Erro do servidor:', message);
+      setErrorMessage(message);
+      setTimeout(() => setErrorMessage(''), 3000);
+    });
     socket.on('connect_error', (error) => {
       console.error('Erro de conexão:', error);
     });
@@ -52,18 +60,43 @@ export default function Home() {
   return (
     <Container>
       <h1>Bem-vindo ao Uno Semi Online</h1>
+      {errorMessage && (
+        <div style={{
+          background: '#ff6b6b',
+          color: 'white',
+          padding: '12px 20px',
+          borderRadius: '8px',
+          marginBottom: '10px',
+          fontWeight: '600',
+          textAlign: 'center'
+        }}>
+          {errorMessage}
+        </div>
+      )}
       <Card>
         <Title>Salas</Title>
       <RoomList>
         {salas.map((sala) => (
-          <RoomItem key={sala.id}>
-            <RoomName>{sala.nome}</RoomName>
+          <RoomItem key={sala.id} isPlaying={sala.isPlaying}>
+            <RoomInfo>
+              <RoomName isPlaying={sala.isPlaying}>{sala.nome}</RoomName>
+              <RoomStatus isPlaying={sala.isPlaying}>
+                {sala.isPlaying 
+                  ? '🎮 Em jogo' 
+                  : `👥 ${sala.playerCount}/10 jogadores`}
+              </RoomStatus>
+            </RoomInfo>
             <RoomButton
+              disabled={sala.isPlaying || sala.playerCount >= 10}
               onClick={() => {
-                setModalAction(sala.id);
-                setModalOpen(true);
+                if (!sala.isPlaying && sala.playerCount < 10) {
+                  setModalAction(sala.id);
+                  setModalOpen(true);
+                }
               }}
-            >Entrar</RoomButton>
+            >
+              {sala.isPlaying ? 'Em jogo' : sala.playerCount >= 10 ? 'Cheia' : 'Entrar'}
+            </RoomButton>
           </RoomItem>
         ))}
       </RoomList>

@@ -50,7 +50,7 @@ function processCardEffect(gameState, card, io, roomId, sala) {
     } else {
       // Jogador não pode defender, compra todas as cartas
       console.log(`💥 Jogador ${nextPlayer.id} vai comprar ${gameState.pendingDraws} cartas`);
-      applyDrawPenalty(gameState, nextPlayerIndex);
+      applyDrawPenalty(gameState, nextPlayerIndex, io, roomId, sala);
       
       // Envia mão atualizada para o jogador que recebeu a penalidade
       io.to(nextPlayer.id).emit("handUpdate", {
@@ -61,7 +61,7 @@ function processCardEffect(gameState, card, io, roomId, sala) {
 }
 
 // Aplica penalidade de comprar cartas
-function applyDrawPenalty(gameState, playerIndex) {
+function applyDrawPenalty(gameState, playerIndex, io, roomId, sala) {
   const player = gameState.players[playerIndex];
   const drawCount = gameState.pendingDraws || 0;
   
@@ -82,6 +82,22 @@ function applyDrawPenalty(gameState, playerIndex) {
   gameState.currentPlayerIndex = 
     (playerIndex + gameState.direction + gameState.players.length) 
     % gameState.players.length;
+  
+  // Envia atualização do jogo para todos os jogadores
+  if (io && roomId && sala) {
+    io.to(`sala_${roomId}`).emit("gameUpdate", {
+      topCard: gameState.topCard,
+      declaredColor: gameState.declaredColor,
+      players: gameState.players.map((p, idx) => ({
+        id: p.id,
+        cardCount: p.cardCount,
+        name: sala.players[idx]?.name || 'Jogador',
+        unoGuard: p.unoGuard || false
+      })),
+      currentPlayerIndex: gameState.currentPlayerIndex,
+      direction: gameState.direction
+    });
+  }
 }
 
 export default function handler(req, res) {
@@ -443,7 +459,7 @@ export default function handler(req, res) {
       } else {
         // Não pode defender, compra todas
         console.log(`💥 Jogador ${nextPlayer.id} vai comprar ${sala.gameState.pendingDraws} cartas`);
-        applyDrawPenalty(sala.gameState, nextPlayerIndex);
+        applyDrawPenalty(sala.gameState, nextPlayerIndex, io, roomId, sala);
         
         // Envia mão atualizada para o jogador que recebeu a penalidade
         io.to(nextPlayer.id).emit("handUpdate", {
@@ -484,7 +500,7 @@ export default function handler(req, res) {
       const playerIndex = sala.gameState.players.findIndex(p => p.id === socket.id);
       
       // Aplica penalidade
-      applyDrawPenalty(sala.gameState, playerIndex);
+      applyDrawPenalty(sala.gameState, playerIndex, io, roomId, sala);
       
       const player = sala.gameState.players[playerIndex];
       
@@ -529,6 +545,21 @@ export default function handler(req, res) {
       if (caller.hand.length === 1) {
         caller.unoGuard = true;
         console.log(`✋ Jogador ${caller.id} ativou UNO Guard`);
+        
+        // Envia atualização para TODOS os jogadores
+        io.to(`sala_${roomId}`).emit("gameUpdate", {
+          topCard: sala.gameState.topCard,
+          declaredColor: sala.gameState.declaredColor,
+          players: sala.gameState.players.map((p, idx) => ({
+            id: p.id,
+            cardCount: p.cardCount,
+            name: sala.players[idx]?.name || 'Jogador',
+            unoGuard: p.unoGuard || false
+          })),
+          currentPlayerIndex: sala.gameState.currentPlayerIndex,
+          direction: sala.gameState.direction
+        });
+        
         if (callback) callback({ success: true, guardActivated: true });
         return;
       }

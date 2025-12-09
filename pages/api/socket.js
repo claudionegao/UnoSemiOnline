@@ -2,11 +2,7 @@ import { Server } from "socket.io";
 import { initializeGame, drawCard, isValidPlay, getDefensiveDrawCards, isDrawCard, calculateDrawPenalty } from "../../lib/unoGame.js";
 
 let clientSockets = [];
-let rooms = [
-  {nome: 'sala do Alice', id: 1, clients: [], players: [], countdown: null, gameState: null},
-  {nome: 'sala do Bob', id: 2, clients: [], players: [], countdown: null, gameState: null},
-  {nome: 'sala do Carol', id: 3, clients: [], players: [], countdown: null, gameState: null},
-];
+let rooms = [];
 
 // Processa efeitos de cartas especiais
 function processCardEffect(gameState, card, io, roomId, sala) {

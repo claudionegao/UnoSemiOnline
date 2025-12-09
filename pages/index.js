@@ -75,31 +75,43 @@ export default function Home() {
       )}
       <Card>
         <Title>Salas</Title>
-      <RoomList>
-        {salas.map((sala) => (
-          <RoomItem key={sala.id} isPlaying={sala.isPlaying}>
-            <RoomInfo>
-              <RoomName isPlaying={sala.isPlaying}>{sala.nome}</RoomName>
-              <RoomStatus isPlaying={sala.isPlaying}>
-                {sala.isPlaying 
-                  ? '🎮 Em jogo' 
-                  : `👥 ${sala.playerCount}/10 jogadores`}
-              </RoomStatus>
-            </RoomInfo>
-            <RoomButton
-              disabled={sala.isPlaying || sala.playerCount >= 10}
-              onClick={() => {
-                if (!sala.isPlaying && sala.playerCount < 10) {
-                  setModalAction(sala.id);
-                  setModalOpen(true);
-                }
-              }}
-            >
-              {sala.isPlaying ? 'Em jogo' : sala.playerCount >= 10 ? 'Cheia' : 'Entrar'}
-            </RoomButton>
-          </RoomItem>
-        ))}
-      </RoomList>
+        {salas.length === 0 && (
+          <div style={{
+            color: '#667eea',
+            fontWeight: 700,
+            fontSize: '16px',
+            textAlign: 'center',
+            margin: '18px 0'
+          }}>
+            Nenhuma sala disponível.<br />
+            Clique em <b>Criar Sala</b> para começar uma partida!
+          </div>
+        )}
+        <RoomList>
+          {salas.map((sala) => (
+            <RoomItem key={sala.id} isPlaying={sala.isPlaying}>
+              <RoomInfo>
+                <RoomName isPlaying={sala.isPlaying}>{sala.nome}</RoomName>
+                <RoomStatus isPlaying={sala.isPlaying}>
+                  {sala.isPlaying 
+                    ? '🎮 Em jogo' 
+                    : `👥 ${sala.playerCount}/10 jogadores`}
+                </RoomStatus>
+              </RoomInfo>
+              <RoomButton
+                disabled={sala.isPlaying || sala.playerCount >= 10}
+                onClick={() => {
+                  if (!sala.isPlaying && sala.playerCount < 10) {
+                    setModalAction(sala.id);
+                    setModalOpen(true);
+                  }
+                }}
+              >
+                {sala.isPlaying ? 'Em jogo' : sala.playerCount >= 10 ? 'Cheia' : 'Entrar'}
+              </RoomButton>
+            </RoomItem>
+          ))}
+        </RoomList>
         <Button onClick={() => { setModalAction('criar'); setModalOpen(true); }}>Criar Sala</Button>
       </Card>
       <ModalName

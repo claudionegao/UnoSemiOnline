@@ -430,8 +430,9 @@ export default function handler(req, res) {
       // Processa efeitos da carta
       processCardEffect(sala.gameState, card, io, roomId, sala);
       
-      // Avança para próximo jogador (só se não for carta Draw ou se não estiver esperando defesa)
-      if (!isDrawCard(card) || !sala.gameState.waitingForDefense) {
+      // Avança para o próximo jogador apenas se NÃO for carta Draw/WDraw
+      // Para Draw/WDraw, applyDrawPenalty já avança a vez corretamente
+      if (!isDrawCard(card)) {
         sala.gameState.currentPlayerIndex = 
           (sala.gameState.currentPlayerIndex + sala.gameState.direction + sala.gameState.players.length) 
           % sala.gameState.players.length;
